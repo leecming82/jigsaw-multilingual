@@ -3,6 +3,7 @@ from sklearn.model_selection import KFold
 
 SEED = 1337
 NUM_FOLDS = 4
+TOXIC_TARGET_COLS = ['toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
 
 
 def generate_train_kfolds_indices(input_df):
@@ -26,6 +27,16 @@ def get_id_text_label_from_csv(csv_path, text_col='comment_text'):
     return raw_df['id'].values, list(raw_df[text_col].values), raw_df['toxic'].values
 
 
+def get_id_text_toxic_labels_from_csv(csv_path, text_col='comment_text'):
+    """
+    Load training data w/ all 6 toxic targets e.g., toxic, severe_toxic etc.
+    :param csv_path: path of csv with 'id' 'comment_text', 'toxic' columns present
+    :return:
+    """
+    raw_df = pd.read_csv(csv_path)
+    return raw_df['id'].values, list(raw_df[text_col].values), raw_df[TOXIC_TARGET_COLS].values
+
+
 def get_id_text_distill_label_from_csv(train_path, distill_path, text_col='comment_text'):
     """
     Load training data together with distillation labels
@@ -36,10 +47,9 @@ def get_id_text_distill_label_from_csv(train_path, distill_path, text_col='comme
     """
     raw_df = pd.read_csv(train_path)
     distill_df = pd.read_csv(distill_path).set_index('id')
-    distill_df = distill_path.loc[raw_df['id']]
+    distill_df = distill_df.loc[raw_df['id']]
     return (raw_df['id'].values,
             list(raw_df[text_col].values),
-            raw_df['toxic'].values,
             distill_df['toxic'].values)
 
 
@@ -53,16 +63,6 @@ def get_id_text_label_from_csvs(list_csv_path, sample_frac=.1, seed=SEED):
     raw_df = raw_df.sample(frac=sample_frac, random_state=seed)
     assert raw_df['id'].nunique() == raw_df.shape[0]
     return raw_df['id'].values, list(raw_df['comment_text'].values), raw_df['toxic'].values
-
-
-def get_id_text_from_test_csv(csv_path):
-    """
-    Load training data
-    :param csv_path: path of csv with 'id' 'comment_text' columns present
-    :return:
-    """
-    raw_pdf = pd.read_csv(csv_path)
-    return raw_pdf['id'].values, list(raw_pdf['content'].values)
 
 
 if __name__ == '__main__':

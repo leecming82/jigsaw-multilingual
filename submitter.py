@@ -1,4 +1,3 @@
-""" Base code for making Kaggle test submissions """
 import os
 import time
 import multiprocessing as mp
@@ -7,16 +6,26 @@ import numpy as np
 import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig, WEIGHTS_NAME
-from preprocessor import get_id_text_from_test_csv
 
-TRAINED_MODEL_PATH = 'models/'
-TEST_CSV_PATH = 'data/test.csv'
+TRAINED_MODEL_PATH = 'models/queue/basic bert'
+TEST_CSV_PATH_1 = 'data/test_en.csv'
+TEST_CSV_PATH_2 = 'data/jigsaw_miltilingual_test_translated.csv'
 SUBMIT_CSV_PATH = 'data/submission.csv'
-MAX_CORES = 2
+MAX_CORES = 24
 MAX_SEQ_LEN = 200
 BATCH_SIZE = 64
 BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
+
+
+def get_id_text_from_test_csv(csv_path, text_col):
+    """
+    Load training data
+    :param csv_path: path of csv with 'id' 'comment_text' columns present
+    :return:
+    """
+    raw_pdf = pd.read_csv(csv_path)
+    return raw_pdf['id'].values, list(raw_pdf[text_col].values)
 
 
 class ClassifierHead(torch.nn.Module):
@@ -42,7 +51,13 @@ class ClassifierHead(torch.nn.Module):
 
 
 start_time = time.time()
-all_ids, all_strings = get_id_text_from_test_csv(TEST_CSV_PATH)
+all_ids, all_strings = get_id_text_from_test_csv(TEST_CSV_PATH_1, text_col='content_en')
+_, all_strings_2 = get_id_text_from_test_csv(TEST_CSV_PATH_2, text_col='translated')
+
+assert len(all_strings) == len(all_strings_2)
+
+all_strings = all_strings + all_strings_2
+print(len(all_strings))
 
 tokenizer = AutoTokenizer.from_pretrained(TRAINED_MODEL_PATH)
 encode_partial = partial(tokenizer.encode,
@@ -69,9 +84,9 @@ with torch.no_grad():
         batch_preds = classifier(batch_features)
         test_preds.append(batch_preds.cpu())
 
-    test_preds = np.concatenate(test_preds)
+    test_preds = np.concatenate(test_preds).squeeze()
 
-pd.DataFrame({'id': all_ids, 'toxic': test_preds.squeeze()}).to_csv(SUBMIT_CSV_PATH, index=False)
+test_preds = (test_preds[:len(all_strings_2)] + test_preds[len(all_strings_2):]) / 2
 
-print(test_preds.shape)
+pd.DataFrame({'id': all_ids, 'toxic': test_preds}).to_csv(SUBMIT_CSV_PATH, index=False)
 print('Elapsed time: {}'.format(time.time() - start_time))
