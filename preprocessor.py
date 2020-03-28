@@ -21,8 +21,20 @@ def get_id_text_label_from_csv(csv_path):
     :param csv_path: path of csv with 'id' 'comment_text', 'toxic' columns present
     :return:
     """
-    raw_pdf = pd.read_csv(csv_path)
-    return raw_pdf['id'].values, list(raw_pdf['comment_text'].values), raw_pdf['toxic'].values
+    raw_df = pd.read_csv(csv_path)
+    return raw_df['id'].values, list(raw_df['comment_text'].values), raw_df['toxic'].values
+
+
+def get_id_text_label_from_csvs(list_csv_path, sample_frac=.1, seed=SEED):
+    """
+    Load training data from multiple csvs
+    :param csv_path: list of csv with 'id' 'comment_text', 'toxic' columns present
+    :return:
+    """
+    raw_df = pd.concat([pd.read_csv(csv_path)[['id', 'comment_text', 'toxic']] for csv_path in list_csv_path])
+    raw_df = raw_df.sample(frac=sample_frac, random_state=seed)
+    assert raw_df['id'].nunique() == raw_df.shape[0]
+    return raw_df['id'].values, list(raw_df['comment_text'].values), raw_df['toxic'].values
 
 
 def get_id_text_from_test_csv(csv_path):
@@ -36,7 +48,5 @@ def get_id_text_from_test_csv(csv_path):
 
 
 if __name__ == '__main__':
-    ids, comments, labels = get_id_text_label_from_csv('data/validation.csv')
-    print(ids)
-    print(comments)
-    print(labels)
+    ids, comments, labels = get_id_text_label_from_csvs(['data/jigsaw-toxic-comment-train.csv',
+                                                         'data/jigsaw-unintended-bias-train.csv'])
