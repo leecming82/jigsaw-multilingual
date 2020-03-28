@@ -1,6 +1,5 @@
 """
-Baseline PyTorch distiller -
-minor mod from classifier_torch: uses specified distilled labels for train labels
+Baseline PyTorch classifier for Jigsaw Multilingual
 """
 import time
 import re
@@ -16,14 +15,15 @@ from sklearn.metrics import roc_auc_score
 from preprocessor import generate_train_kfolds_indices, get_id_text_label_from_csv
 from postprocessor import score_roc_auc
 from apex import amp
+from tqdm import trange
 
 USE_AMP = True
-PRETRAINED_MODEL = 'bert-base-multilingual-cased'
-DISTILLED_LABELS_CSV = 'data/oof/pt_bert-base-multilingual-cased_4_200.csv'
-TRAIN_CSV_PATH = 'data/validation.csv'
+PRETRAINED_MODEL = 'distilbert-base-uncased'
+TRAIN_CSV_PATH = 'data/jigsaw-toxic-comment-train.csv'
+DISTILLED_LABELS_CSV = 'data/oof/pt_distilbert-base-uncased_3_200.csv'
 OUTPUT_DIR = 'models/'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
-MAX_CORES = 8  # limit MP calls to use this # cores at most
+MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
@@ -58,7 +58,9 @@ class ClassifierHead(torch.nn.Module):
         return prob
 
 
-def train_driver(fold_id, fold_indices, all_features, all_labels, distill_labels, all_ids, gpu_id_queue):
+def train_driver(fold_id, fold_indices, all_features,
+                 all_labels, distill_labels,
+                 all_ids, gpu_id_queue):
     use_gpu_id = gpu_id_queue.get()
     fold_start_time = time.time()
     import os
@@ -78,7 +80,7 @@ def train_driver(fold_id, fold_indices, all_features, all_labels, distill_labels
         classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
 
     train_indices, val_indices = fold_indices
-    if fold_id is None:
+    if fold_id is None:  # train on all including k-fold validation data
         train_indices = np.concatenate([train_indices, val_indices])
     val_features, val_labels, val_ids = all_features[val_indices], all_labels[val_indices], all_ids[val_indices]
 
@@ -95,26 +97,29 @@ def train_driver(fold_id, fold_indices, all_features, all_labels, distill_labels
                 g['lr'] = 1e-5
 
         classifier.train()
-        for batch_idx_start in range(0, len(train_indices), BATCH_SIZE):
-            opt.zero_grad()
-            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(train_indices))
+        with trange(0, len(train_indices), BATCH_SIZE,
+                    desc='Fold {} - Epoch {}'.format(fold_id, curr_epoch),
+                    position=use_gpu_id) as t:
+            for batch_idx_start in t:
+                opt.zero_grad()
+                batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(train_indices))
 
-            batch_features = torch.tensor(train_features[batch_idx_start:batch_idx_end]).cuda()
-            batch_labels = torch.tensor(train_labels[batch_idx_start:batch_idx_end]).float().cuda().unsqueeze(-1)
+                batch_features = torch.tensor(train_features[batch_idx_start:batch_idx_end]).cuda()
+                batch_labels = torch.tensor(train_labels[batch_idx_start:batch_idx_end]).float().cuda().unsqueeze(-1)
 
-            if curr_epoch < 1:
-                preds = classifier(batch_features, freeze=True)
-            else:
-                preds = classifier(batch_features, freeze=False)
-            loss = loss_fn(preds, batch_labels)
+                if curr_epoch < 1:
+                    preds = classifier(batch_features, freeze=True)
+                else:
+                    preds = classifier(batch_features, freeze=False)
+                loss = loss_fn(preds, batch_labels)
 
-            if USE_AMP:
-                with amp.scale_loss(loss, opt) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
+                if USE_AMP:
+                    with amp.scale_loss(loss, opt) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
 
-            opt.step()
+                opt.step()
 
         if fold_id is not None:
             # Evaluate validation fold
@@ -133,12 +138,17 @@ def train_driver(fold_id, fold_indices, all_features, all_labels, distill_labels
                 epoch_eval_score.append(val_roc_auc_score)
                 epoch_val_id_to_pred.append({val_id: val_pred for val_id, val_pred in zip(val_ids, val_preds)})
         else:
-            output_model_file = os.path.join(OUTPUT_DIR, WEIGHTS_NAME)
-            output_config_file = os.path.join(OUTPUT_DIR, CONFIG_NAME)
+            # Saving model trained on all data
+            model_output_path = os.path.join(OUTPUT_DIR, 'distill_' + PRETRAINED_MODEL)
+            if not os.path.exists(model_output_path):
+                os.makedirs(model_output_path)
+
+            output_model_file = os.path.join(model_output_path, WEIGHTS_NAME)
+            output_config_file = os.path.join(model_output_path, CONFIG_NAME)
 
             torch.save(classifier.state_dict(), output_model_file)
             pretrained_config.to_json_file(output_config_file)
-            tokenizer.save_vocabulary(OUTPUT_DIR)
+            tokenizer.save_vocabulary(model_output_path)
     gpu_id_queue.put(use_gpu_id)
     print('Fold {} run-time: {:.4f}'.format(fold_id, time.time() - fold_start_time))
     return epoch_eval_score, epoch_val_id_to_pred
@@ -147,9 +157,13 @@ def train_driver(fold_id, fold_indices, all_features, all_labels, distill_labels
 if __name__ == '__main__':
     start_time = time.time()
     all_ids, all_strings, all_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH)
-    distill_labels = pd.read_csv(DISTILLED_LABELS_CSV)['toxic'].values
     # all_strings = [x.lower() for x in all_strings]
     fold_indices = generate_train_kfolds_indices(all_strings)
+
+    distill_df = pd.read_csv(DISTILLED_LABELS_CSV).set_index('id')
+    distill_df = distill_df.loc[all_ids]
+    distill_labels = distill_df['toxic'].values
+    assert (all_ids == distill_df.index.values).all()
 
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
@@ -163,6 +177,8 @@ if __name__ == '__main__':
     print('Encoding raw strings into model-specific tokens')
     with mp.Pool(MAX_CORES) as p:
         all_features = np.array(p.map(encode_partial, all_strings))
+
+    print(all_features.shape)
 
     print('Starting kfold training')
     with mp.Pool(NUM_GPUS, maxtasksperchild=1) as p:
@@ -191,10 +207,10 @@ if __name__ == '__main__':
         oof_preds.columns = ['id', 'toxic']
         oof_out_path = 'data/oof/pt_distill_{}_{}_{}.csv'.format(PRETRAINED_MODEL, curr_epoch + 1, MAX_SEQ_LEN)
         oof_preds.sort_values(by='id').to_csv(oof_out_path, index=False)
-        oof_scores.append(score_roc_auc('data/validation.csv', oof_out_path))
+        oof_scores.append(score_roc_auc(TRAIN_CSV_PATH, oof_out_path))
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(oof_scores))
 
-    train_driver(None, fold_indices[0], all_features, all_labels, distill_labels, all_ids, gpu_id_queue)
+    train_driver(None, fold_indices[0], all_features, all_labels, all_ids, gpu_id_queue)
     print('Elapsed time: {}'.format(time.time() - start_time))
