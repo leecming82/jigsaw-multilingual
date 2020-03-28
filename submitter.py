@@ -61,6 +61,7 @@ classifier.load_state_dict(torch.load(os.path.join(TRAINED_MODEL_PATH, WEIGHTS_N
 
 print('Predicting test comments')
 test_preds = []
+classifier.eval()
 with torch.no_grad():
     for batch_idx_start in range(0, len(all_features), BATCH_SIZE):
         batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(all_features))
