@@ -34,4 +34,4 @@ def save_model(output_dir, model, config, tokenizer):
 
     torch.save(model.state_dict(), output_model_file)
     config.to_json_file(output_config_file)
-    tokenizer.save_vocabulary(output_dir)
+    tokenizer.save_pretrained(output_dir)
