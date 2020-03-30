@@ -20,20 +20,24 @@ from torch_helpers import EMA, save_model
 
 USE_AMP = True
 USE_MULTI_GPU = False
-USE_PSEUDO_LABELS = True
+USE_PSEUDO_LABELS = False
 PSEUDO_TEXT_PATH = 'data/test.csv'
 PSEUDO_LABEL_PATH = 'data/test/bert-base-pl1.csv'
+USE_DISTILL = False
+DISTILL_TEXT_PATH = 'data/toxic_2018/train.csv'
+DISTILL_LABEL_PATH = 'data/toxic_2018/ensemble_3.csv'
 SAVE_MODEL = True
 OUTPUT_DIR = 'models/multilingual'
 TRAIN_CSV_PATH = 'data/validation.csv'
-PRETRAINED_MODEL = 'bert-base-multilingual-uncased'
+PRETRAINED_MODEL = 'xlm-roberta-large'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 8  # limit MP calls to use this # cores at most
-BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
+BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 5
-BATCH_SIZE = 64
+NUM_EPOCHS = 6
+BATCH_SIZE = 16
+ACCUM_FOR = 1
 USE_EMA = False
 EMA_DECAY = 0.999
 
@@ -83,11 +87,12 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id
             g['lr'] = 1e-5
 
     model.train()
+    iter = 0
     with trange(0, len(train_indices), BATCH_SIZE,
                 desc='{} - {}'.format(fold_id, curr_epoch),
                 position=use_gpu_id) as t:
         for batch_idx_start in t:
-            opt.zero_grad()
+            iter += 1
             batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(train_indices))
 
             batch_features = torch.tensor(train_features[batch_idx_start:batch_idx_end]).cuda()
@@ -105,7 +110,9 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id
             else:
                 loss.backward()
 
-            opt.step()
+            if iter % ACCUM_FOR == 0:
+                opt.step()
+                opt.zero_grad()
 
             if USE_EMA:
                 # Update EMA shadow parameters on every back pass
@@ -132,27 +139,10 @@ def evaluate(model, val_tuple):
     return val_roc_auc_score, val_preds
 
 
-def predict(model, predict_tuple):
-    features, labels, ids = predict_tuple
-
-    model.eval()
-    preds = []
-    with torch.no_grad():
-        for batch_idx_start in range(0, len(ids), BATCH_SIZE):
-            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(ids))
-            batch_features = torch.tensor(features[batch_idx_start:batch_idx_end]).cuda()
-            batch_preds = model(batch_features)
-            preds.append(batch_preds.cpu())
-
-        preds = np.concatenate(preds)
-    return preds
-
-
-def main_driver(fold_id,
-                main_fold_indices,
-                pseudo_fold_indices,
-                main_tuple,
+def main_driver(fold_id, fold_indices,
+                all_tuple,
                 pseudo_tuple,
+                distill_tuple,
                 gpu_id_queue):
     use_gpu_id = gpu_id_queue.get()
     fold_start_time = time.time()
@@ -183,29 +173,33 @@ def main_driver(fold_id,
     if USE_MULTI_GPU:
         classifier = torch.nn.DataParallel(classifier)
 
-    main_features, main_labels, main_ids = main_tuple
+    all_features, all_labels, all_ids = all_tuple
     pseudo_features, pseudo_labels, pseudo_ids = pseudo_tuple
 
-    main_train_indices, main_val_indices = main_fold_indices
-    main_train_features, main_train_labels = main_features[main_train_indices], main_labels[main_train_indices]
-    main_val_features, main_val_labels, main_val_ids = main_features[main_val_indices], main_labels[main_val_indices], \
-                                                       main_ids[main_val_indices]
+    train_indices, val_indices = fold_indices
+    train_features, train_labels = all_features[train_indices], all_labels[train_indices]
+    val_features, val_labels, val_ids = all_features[val_indices], all_labels[val_indices], all_ids[val_indices]
+
+    if USE_DISTILL:
+        distill_features, distill_labels, _ = distill_tuple
+        train_features = np.concatenate([train_features, distill_features])
+        train_labels = np.concatenate([train_labels, distill_labels])
+        train_indices = list(range(len(train_features)))
 
     if USE_PSEUDO_LABELS:
-        pseudo_train_indices, pseudo_val_indices = pseudo_fold_indices
-        main_train_features = np.concatenate([pseudo_features[pseudo_train_indices], main_train_features])
-        main_train_labels = np.concatenate([pseudo_labels[pseudo_train_indices], main_train_labels])
-        main_train_indices = list(range(len(main_train_labels)))
+        train_features = np.concatenate([pseudo_features, train_features])
+        train_labels = np.concatenate([pseudo_labels, train_labels])
+        train_indices = list(range(len(train_labels)))
 
     if fold_id == 0:
-        print('train size: {}, val size: {}'.format(len(main_train_indices), len(main_val_indices)))
+        print('train size: {}, val size: {}'.format(len(train_indices), len(val_indices)))
 
     epoch_eval_score = []
     epoch_val_id_to_pred = []
     best_auc = -1
     for curr_epoch in range(NUM_EPOCHS):
         # Shuffle train indices for current epoch, batching
-        shuffle(main_train_indices)
+        shuffle(train_indices)
 
         # switch to finetune
         if curr_epoch == 1:
@@ -213,7 +207,7 @@ def main_driver(fold_id,
                 g['lr'] = 1e-5
 
         train(classifier,
-              [main_train_features, main_train_labels, None],
+              [train_features, train_labels, None],
               loss_fn,
               opt,
               curr_epoch,
@@ -222,21 +216,13 @@ def main_driver(fold_id,
               fold_id)
 
         # Evaluate validation fold
-        epoch_auc, val_preds = evaluate(classifier, [main_val_features, main_val_labels, main_val_ids])
+        epoch_auc, val_preds = evaluate(classifier, [val_features, val_labels, val_ids])
         print('Fold {}, Epoch {} - AUC: {:.4f}'.format(fold_id, curr_epoch, epoch_auc))
         epoch_eval_score.append(epoch_auc)
+        epoch_val_id_to_pred.append({val_id: val_pred for val_id, val_pred in zip(val_ids, val_preds)})
 
-        # If use pseudo_labels, store OOF preds for it instead
-        if USE_PSEUDO_LABELS:
-            val_preds = predict(classifier, [pseudo_features[pseudo_val_indices],
-                                             pseudo_labels[pseudo_val_indices],
-                                             pseudo_ids[pseudo_val_indices]])
-            epoch_val_id_to_pred.append({val_id: val_pred for val_id, val_pred in zip(pseudo_ids[pseudo_val_indices],
-                                                                                      val_preds)})
-
-        if epoch_auc > best_auc and SAVE_MODEL and fold_id == 0:
-            print('Translated AUC increased; saving model')
-            best_auc = epoch_auc
+        if fold_id == 0:
+            print('Saving model')
             save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL), classifier, pretrained_config, tokenizer)
 
     if USE_EMA and SAVE_MODEL and fold_id == 0:
@@ -244,7 +230,7 @@ def main_driver(fold_id,
         for name, param in classifier.named_parameters():
             if param.requires_grad:
                 param.data = ema.get(name)
-        epoch_auc, _ = evaluate(classifier, [main_val_features, main_val_labels, main_val_ids])
+        epoch_auc = evaluate(classifier, [val_features, val_labels, val_ids])
         print('EMA ->Fold {}, Epoch {} - AUC: {:.4f}'.format(fold_id, curr_epoch, epoch_auc))
         save_model(os.path.join(OUTPUT_DIR, '{}_ema'.format(PRETRAINED_MODEL)), classifier, pretrained_config,
                    tokenizer)
@@ -257,14 +243,17 @@ def main_driver(fold_id,
 if __name__ == '__main__':
     start_time = time.time()
     print('Using model: {}'.format(PRETRAINED_MODEL))
-    main_ids, main_strings, main_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH)
+    all_ids, all_strings, all_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH)
     pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_distill_label_from_csv(PSEUDO_TEXT_PATH,
                                                                                    PSEUDO_LABEL_PATH,
                                                                                    'content')
     pseudo_features = None
 
-    main_fold_indices = generate_train_kfolds_indices(main_strings)
-    pseudo_fold_indices = generate_train_kfolds_indices(pseudo_strings)
+    distill_ids, distill_strings, distill_labels = get_id_text_distill_label_from_csv(DISTILL_TEXT_PATH,
+                                                                                      DISTILL_LABEL_PATH)
+    distill_features = None
+
+    fold_indices = generate_train_kfolds_indices(all_strings)
 
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
@@ -277,7 +266,9 @@ if __name__ == '__main__':
                              add_special_tokens=True)
     print('Encoding raw strings into model-specific tokens')
     with mp.Pool(MAX_CORES) as p:
-        main_features = np.array(p.map(encode_partial, main_strings))
+        all_features = np.array(p.map(encode_partial, all_strings))
+        if USE_DISTILL:
+            distill_features = np.array(p.map(encode_partial, distill_strings))
         if USE_PSEUDO_LABELS:
             pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
 
@@ -288,27 +279,26 @@ if __name__ == '__main__':
         [gpu_id_queue.put(i) for i in range(NUM_GPUS)]
 
         results = p.starmap(main_driver,
-                            ((i,
-                              main_fold_indices[i],
-                              pseudo_fold_indices[i],
-                              [main_features, main_labels, main_ids],
+                            ((fold_id,
+                              curr_fold_indices,
+                              [all_features, all_labels, all_ids],
                               [pseudo_features, pseudo_labels, pseudo_ids],
-                              gpu_id_queue) for i in range(len(main_fold_indices))))
+                              [distill_features, distill_labels, distill_ids],
+                              gpu_id_queue) for (fold_id, curr_fold_indices) in enumerate(fold_indices)))
 
     mean_score = np.mean(np.stack([x[0] for x in results]), axis=0)
     with np.printoptions(precision=4, suppress=True):
         print('Mean fold ROC_AUC_SCORE: {}'.format(mean_score))
 
-    if USE_PSEUDO_LABELS:
-        for curr_epoch in range(NUM_EPOCHS):
-            oof_preds = {}
-            [oof_preds.update(x[1][curr_epoch]) for x in results]
-            oof_preds = pd.DataFrame.from_dict(oof_preds, orient='index').reset_index()
-            oof_preds.columns = ['id', 'toxic']
-            oof_preds.sort_values(by='id') \
-                .to_csv('data/oof/multilingual_{}_{}_{}.csv'.format(PRETRAINED_MODEL,
-                                                                    curr_epoch + 1,
-                                                                    MAX_SEQ_LEN),
-                        index=False)
+    for curr_epoch in range(NUM_EPOCHS):
+        oof_preds = {}
+        [oof_preds.update(x[1][curr_epoch]) for x in results]
+        oof_preds = pd.DataFrame.from_dict(oof_preds, orient='index').reset_index()
+        oof_preds.columns = ['id', 'toxic']
+        oof_preds.sort_values(by='id') \
+            .to_csv('data/oof/multilingual_{}_{}_{}.csv'.format(PRETRAINED_MODEL,
+                                                                curr_epoch + 1,
+                                                                MAX_SEQ_LEN),
+                    index=False)
 
     print('Elapsed time: {}'.format(time.time() - start_time))
