@@ -1,9 +1,5 @@
 """
-Classify based on original language comments w/ k-folds validation
-# TRAIN -> base training dataset
-# DISTILL -> additional dataset which requires to join 2 CSVs
-# PSEUDO_LABEL -> same
-# k-fold validation only applied to the TRAIN data
+Classify w/ k-folds validation
 """
 import time
 import pandas as pd
@@ -24,24 +20,19 @@ from torch_helpers import EMA, save_model, layerwise_lr_decay
 
 USE_AMP = True
 USE_MULTI_GPU = False
-USE_PSEUDO_LABELS = False
-USE_DISTILL = False
 SAVE_MODEL = True
 USE_EMA = False
 USE_LR_DECAY = False
-TRAIN_CSV_PATH = 'data/validation.csv'
-PSEUDO_TEXT_PATH = 'data/test.csv'
-PSEUDO_LABEL_PATH = 'data/test/bert-base-pl1.csv'
-DISTILL_TEXT_PATH = 'data/toxic_2018/train.csv'
-DISTILL_LABEL_PATH = 'data/toxic_2018/ensemble_3.csv'
-OUTPUT_DIR = 'models/multilingual'
+TRAIN_CSV_PATHS = [['data/toxic_2018/combined.csv', 0.4],
+                   ['data/validation.csv', 1.]]
+OUTPUT_DIR = 'models/kfolds/'
 PRETRAINED_MODEL = 'xlm-roberta-large'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 8  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 5
+NUM_EPOCHS = 4
 BATCH_SIZE = 24
 ACCUM_FOR = 2
 EMA_DECAY = 0.999
@@ -150,8 +141,6 @@ def evaluate(model, val_tuple):
 
 def main_driver(fold_id, fold_indices,
                 all_tuple,
-                pseudo_tuple,
-                distill_tuple,
                 gpu_id_queue):
     use_gpu_id = gpu_id_queue.get()
     fold_start_time = time.time()
@@ -187,29 +176,17 @@ def main_driver(fold_id, fold_indices,
         classifier = torch.nn.DataParallel(classifier)
 
     all_features, all_labels, all_ids = all_tuple
-    pseudo_features, pseudo_labels, pseudo_ids = pseudo_tuple
+    # pseudo_features, pseudo_labels, pseudo_ids = pseudo_tuple
 
     train_indices, val_indices = fold_indices
     train_features, train_labels = all_features[train_indices], all_labels[train_indices]
     val_features, val_labels, val_ids = all_features[val_indices], all_labels[val_indices], all_ids[val_indices]
-
-    if USE_DISTILL:
-        distill_features, distill_labels, _ = distill_tuple
-        train_features = np.concatenate([train_features, distill_features])
-        train_labels = np.concatenate([train_labels, distill_labels])
-        train_indices = list(range(len(train_features)))
-
-    if USE_PSEUDO_LABELS:
-        train_features = np.concatenate([pseudo_features, train_features])
-        train_labels = np.concatenate([pseudo_labels, train_labels])
-        train_indices = list(range(len(train_labels)))
 
     if fold_id == 0:
         print('train size: {}, val size: {}'.format(len(train_indices), len(val_indices)))
 
     epoch_eval_score = []
     epoch_val_id_to_pred = []
-    best_auc = -1
     for curr_epoch in range(NUM_EPOCHS):
         # Shuffle train indices for current epoch, batching
         shuffle(train_indices)
@@ -251,15 +228,11 @@ def main_driver(fold_id, fold_indices,
 if __name__ == '__main__':
     start_time = time.time()
     print('Using model: {}'.format(PRETRAINED_MODEL))
-    all_ids, all_strings, all_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH)
-    pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_distill_label_from_csv(PSEUDO_TEXT_PATH,
-                                                                                   PSEUDO_LABEL_PATH,
-                                                                                   'content')
-    pseudo_features = None
-
-    distill_ids, distill_strings, distill_labels = get_id_text_distill_label_from_csv(DISTILL_TEXT_PATH,
-                                                                                      DISTILL_LABEL_PATH)
-    distill_features = None
+    train_tuple = [get_id_text_label_from_csv(curr_path, sample_frac=curr_frac)
+                   for curr_path, curr_frac in TRAIN_CSV_PATHS]
+    all_ids = np.concatenate([x[0] for x in train_tuple])
+    all_strings = np.concatenate([x[1] for x in train_tuple])
+    all_labels = np.concatenate([x[2] for x in train_tuple])
 
     fold_indices = generate_train_kfolds_indices(all_strings)
 
@@ -275,10 +248,8 @@ if __name__ == '__main__':
     print('Encoding raw strings into model-specific tokens')
     with mp.Pool(MAX_CORES) as p:
         all_features = np.array(p.map(encode_partial, all_strings))
-        if USE_DISTILL:
-            distill_features = np.array(p.map(encode_partial, distill_strings))
-        if USE_PSEUDO_LABELS:
-            pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
+
+    print(all_ids.shape, all_features.shape, all_labels.shape)
 
     print('Starting kfold training')
     with mp.Pool(NUM_GPUS, maxtasksperchild=1) as p:
@@ -287,12 +258,10 @@ if __name__ == '__main__':
         [gpu_id_queue.put(i) for i in range(NUM_GPUS)]
 
         results = p.starmap(main_driver,
-                          ((fold_id,
-                            curr_fold_indices,
-                            [all_features, all_labels, all_ids],
-                            [pseudo_features, pseudo_labels, pseudo_ids],
-                            [distill_features, distill_labels, distill_ids],
-                            gpu_id_queue) for (fold_id, curr_fold_indices) in enumerate(fold_indices)))
+                            ((fold_id,
+                              curr_fold_indices,
+                              [all_features, all_labels, all_ids],
+                              gpu_id_queue) for (fold_id, curr_fold_indices) in enumerate(fold_indices)))
 
     mean_score = np.mean(np.stack([x[0] for x in results]), axis=0)
     with np.printoptions(precision=4, suppress=True):
@@ -304,9 +273,9 @@ if __name__ == '__main__':
         oof_preds = pd.DataFrame.from_dict(oof_preds, orient='index').reset_index()
         oof_preds.columns = ['id', 'toxic']
         oof_preds.sort_values(by='id') \
-            .to_csv('data/oof/multilingual_{}_{}_{}.csv'.format(PRETRAINED_MODEL,
-                                                                curr_epoch + 1,
-                                                                MAX_SEQ_LEN),
+            .to_csv('data/oof/kfolds_{}_{}_{}.csv'.format(PRETRAINED_MODEL,
+                                                          curr_epoch + 1,
+                                                          MAX_SEQ_LEN),
                     index=False)
 
     print('Elapsed time: {}'.format(time.time() - start_time))
