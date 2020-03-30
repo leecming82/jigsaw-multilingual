@@ -1,3 +1,5 @@
+import os
+import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
@@ -11,6 +13,19 @@ def score_roc_auc(target_csv, predicted_csv):
                          compare_df['toxic'].values)
 
 
+def generate_pseudo_labels(list_csvs,
+                           text_csv,
+                           text_col,
+                           output_csv):
+    base_df = pd.read_csv(text_csv)[['id', text_col]]
+    base_df['toxic'] = np.mean(np.stack([pd.read_csv(x)['toxic'].values for x in list_csvs]), 0)
+    base_df.to_csv(output_csv, index=False)
+
+
 if __name__ == '__main__':
-    print(score_roc_auc('data/validation.csv',
-                        'data/submission.csv'))
+    generate_pseudo_labels(['data/test/bert-base-multilingual-cased.csv',
+                            'data/test/bert-base-uncased.csv',
+                            'data/test/bart-large.csv'],
+                           'data/test_en.csv',
+                           'content_en',
+                           'data/pseudo_test.csv')
