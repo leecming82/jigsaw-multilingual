@@ -1,5 +1,6 @@
 import os
 import torch
+import re
 from transformers import WEIGHTS_NAME, CONFIG_NAME
 
 class EMA:
@@ -35,3 +36,29 @@ def save_model(output_dir, model, config, tokenizer):
     torch.save(model.state_dict(), output_model_file)
     config.to_json_file(output_config_file)
     tokenizer.save_pretrained(output_dir)
+
+
+def layerwise_lr_decay(model, base_lr, decay_factor):
+    # layerwise (at transformer block level) decay of LR
+    decayed_lr_params = []
+    max_num = None
+    for name, param in reversed(list(model.named_parameters())):
+        try:
+            if 'base_model' not in name:  # classifier layers
+                block_lr = base_lr
+            else:
+                if 'layer' in name:
+                    block_num = int(re.findall(r'\d+', name)[0]) + 1
+                    if max_num is None:
+                        max_num = block_num
+                else:  # typically embeddings
+                    block_num = 0
+
+                block_lr = base_lr * decay_factor ** (max_num - block_num)
+        except:  # for base_model without number that aren't embeddings - pooler at the head
+            block_lr = base_lr
+
+        # print(name, block_lr)
+        decayed_lr_params.append({'params': param,
+                                  'lr': block_lr})
+    return decayed_lr_params
