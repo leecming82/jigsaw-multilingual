@@ -15,33 +15,38 @@ from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
 from preprocessor import get_id_text_label_from_csv, get_id_text_distill_label_from_csv
-from torch_helpers import EMA, save_model
+from torch_helpers import EMA, save_model, layerwise_lr_decay
 
-SAVE_MODEL = False
+SAVE_MODEL = True
 USE_AMP = True
 USE_EMA = False
 USE_DISTILL = True
 USE_MULTI_GPU = False
+USE_LR_DECAY = False
 PRETRAINED_MODEL = 'xlm-roberta-large'
-# TRAIN_CSV_PATH = 'data/combined_pseudo.csv'
+TRAIN_SAMPLE_FRAC = 0.2  # what % of training data to use
+# TRAIN_CSV_PATH = 'data/jigsaw-toxic-comment-train.csv'
 # DISTIL_CSV_PATH = None
 TRAIN_CSV_PATH = 'data/toxic_2018/train.csv'
 DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
-OUTPUT_DIR = 'models/'
+OUTPUT_DIR = 'models/frac20/'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
-BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
+BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 5
+NUM_EPOCHS = 6
 BATCH_SIZE = 24
 ACCUM_FOR = 2
 EMA_DECAY = 0.999
+LR_DECAY_FACTOR = 0.75
+LR_DECAY_START = 1e-3
+LR_FINETUNE = 1e-5
 
 if not USE_MULTI_GPU:
     os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 class ClassifierHead(torch.nn.Module):
@@ -54,7 +59,7 @@ class ClassifierHead(torch.nn.Module):
         super(ClassifierHead, self).__init__()
         self.base_model = base_model
         self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS, kernel_size=1)
-        # self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS)
+        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS)
 
     def forward(self, x, freeze=True):
         if freeze:
@@ -83,10 +88,11 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema):
     train_features = all_features[train_indices]
     train_labels = all_labels[train_indices]
 
-    # switch to finetune
+    # switch to finetune - only lower for those > finetune LR
+    # i.e., lower layers might have even smaller LR
     if curr_epoch == 1:
         for g in opt.param_groups:
-            g['lr'] = 1e-5
+            g['lr'] = LR_FINETUNE
 
     model.train()
     iter = 0
@@ -158,7 +164,11 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, tokenizer):
         ema = None
 
     loss_fn = torch.nn.BCELoss()
-    opt = torch.optim.Adam(classifier.parameters(), lr=1e-3)
+    if USE_LR_DECAY:
+        parameters_update = layerwise_lr_decay(classifier, LR_DECAY_START, LR_DECAY_FACTOR)
+        opt = torch.optim.Adam(parameters_update)
+    else:
+        opt = torch.optim.Adam(classifier.parameters(), lr=LR_DECAY_START)
 
     if USE_AMP:
         amp.register_float_function(torch, 'sigmoid')
@@ -167,8 +177,8 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, tokenizer):
     if USE_MULTI_GPU:
         classifier = torch.nn.DataParallel(classifier)
 
-    best_raw_auc, best_translated_auc = -1, -1
     list_raw_auc, list_translated_auc = [], []
+
     for curr_epoch in range(NUM_EPOCHS):
         train(classifier, train_tuple, loss_fn, opt, curr_epoch, ema)
 
@@ -178,10 +188,8 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, tokenizer):
         list_raw_auc.append(epoch_raw_auc)
         list_translated_auc.append(epoch_translated_auc)
 
-        if epoch_translated_auc > best_translated_auc and SAVE_MODEL:
-            print('Translated AUC increased; saving model')
-            best_translated_auc = epoch_translated_auc
-            save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL), classifier, pretrained_config, tokenizer)
+        print('Saving epoch {} model'.format(curr_epoch))
+        save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, str(curr_epoch)), classifier, pretrained_config, tokenizer)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_raw_auc))
@@ -203,9 +211,12 @@ if __name__ == '__main__':
     start_time = time.time()
 
     if USE_DISTILL:
-        train_ids, train_strings, train_labels = get_id_text_distill_label_from_csv(TRAIN_CSV_PATH, DISTIL_CSV_PATH)
+        train_ids, train_strings, train_labels = get_id_text_distill_label_from_csv(TRAIN_CSV_PATH,
+                                                                                    DISTIL_CSV_PATH,
+                                                                                    sample_frac=TRAIN_SAMPLE_FRAC)
     else:
-        train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH)
+        train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
+                                                                            sample_frac=TRAIN_SAMPLE_FRAC)
     val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
     _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
 

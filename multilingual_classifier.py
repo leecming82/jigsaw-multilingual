@@ -1,5 +1,9 @@
 """
 Classify based on original language comments w/ k-folds validation
+# TRAIN -> base training dataset
+# DISTILL -> additional dataset which requires to join 2 CSVs
+# PSEUDO_LABEL -> same
+# k-fold validation only applied to the TRAIN data
 """
 import time
 import pandas as pd
@@ -16,30 +20,34 @@ from tqdm import trange
 from preprocessor import (generate_train_kfolds_indices,
                           get_id_text_distill_label_from_csv,
                           get_id_text_label_from_csv)
-from torch_helpers import EMA, save_model
+from torch_helpers import EMA, save_model, layerwise_lr_decay
 
 USE_AMP = True
 USE_MULTI_GPU = False
 USE_PSEUDO_LABELS = False
+USE_DISTILL = False
+SAVE_MODEL = True
+USE_EMA = False
+USE_LR_DECAY = False
+TRAIN_CSV_PATH = 'data/validation.csv'
 PSEUDO_TEXT_PATH = 'data/test.csv'
 PSEUDO_LABEL_PATH = 'data/test/bert-base-pl1.csv'
-USE_DISTILL = False
 DISTILL_TEXT_PATH = 'data/toxic_2018/train.csv'
 DISTILL_LABEL_PATH = 'data/toxic_2018/ensemble_3.csv'
-SAVE_MODEL = True
 OUTPUT_DIR = 'models/multilingual'
-TRAIN_CSV_PATH = 'data/validation.csv'
 PRETRAINED_MODEL = 'xlm-roberta-large'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 8  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 6
-BATCH_SIZE = 16
-ACCUM_FOR = 1
-USE_EMA = False
+NUM_EPOCHS = 5
+BATCH_SIZE = 24
+ACCUM_FOR = 2
 EMA_DECAY = 0.999
+LR_DECAY_FACTOR = 0.75
+LR_DECAY_START = 1e-3
+LR_FINETUNE = 1e-5
 
 
 class ClassifierHead(torch.nn.Module):
@@ -81,10 +89,11 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id
     train_features = all_features[train_indices]
     train_labels = all_labels[train_indices]
 
-    # switch to finetune
+    # switch to finetune - only lower for those > finetune LR
+    # i.e., lower layers might have even smaller LR
     if curr_epoch == 1:
         for g in opt.param_groups:
-            g['lr'] = 1e-5
+            g['lr'] = LR_FINETUNE
 
     model.train()
     iter = 0
@@ -164,7 +173,11 @@ def main_driver(fold_id, fold_indices,
         ema = None
 
     loss_fn = torch.nn.BCELoss()
-    opt = torch.optim.Adam(classifier.parameters(), lr=1e-3)
+    if USE_LR_DECAY:
+        parameters_update = layerwise_lr_decay(classifier, LR_DECAY_START, LR_DECAY_FACTOR)
+        opt = torch.optim.Adam(parameters_update)
+    else:
+        opt = torch.optim.Adam(classifier.parameters(), lr=LR_DECAY_START)
 
     if USE_AMP:
         amp.register_float_function(torch, 'sigmoid')
@@ -200,11 +213,6 @@ def main_driver(fold_id, fold_indices,
     for curr_epoch in range(NUM_EPOCHS):
         # Shuffle train indices for current epoch, batching
         shuffle(train_indices)
-
-        # switch to finetune
-        if curr_epoch == 1:
-            for g in opt.param_groups:
-                g['lr'] = 1e-5
 
         train(classifier,
               [train_features, train_labels, None],
@@ -279,12 +287,12 @@ if __name__ == '__main__':
         [gpu_id_queue.put(i) for i in range(NUM_GPUS)]
 
         results = p.starmap(main_driver,
-                            ((fold_id,
-                              curr_fold_indices,
-                              [all_features, all_labels, all_ids],
-                              [pseudo_features, pseudo_labels, pseudo_ids],
-                              [distill_features, distill_labels, distill_ids],
-                              gpu_id_queue) for (fold_id, curr_fold_indices) in enumerate(fold_indices)))
+                          ((fold_id,
+                            curr_fold_indices,
+                            [all_features, all_labels, all_ids],
+                            [pseudo_features, pseudo_labels, pseudo_ids],
+                            [distill_features, distill_labels, distill_ids],
+                            gpu_id_queue) for (fold_id, curr_fold_indices) in enumerate(fold_indices)))
 
     mean_score = np.mean(np.stack([x[0] for x in results]), axis=0)
     with np.printoptions(precision=4, suppress=True):
