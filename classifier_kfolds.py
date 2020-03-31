@@ -1,5 +1,8 @@
 """
 Classify w/ k-folds validation
+- for validation, we flag only samples we're interested in at TRAIN_CSV_PATHS
+  since we do not want to factor english language samples
+- Note: we're also k-folding on the base english dataset (better to use all and k-fold only on non-english?)
 """
 import time
 import pandas as pd
@@ -23,8 +26,9 @@ USE_MULTI_GPU = False
 SAVE_MODEL = True
 USE_EMA = False
 USE_LR_DECAY = False
-TRAIN_CSV_PATHS = [['data/toxic_2018/combined.csv', 0.4],
-                   ['data/validation.csv', 1.]]
+# PATH TUPLE - (PATH, SAMPLE_FRAC, WHETHER_TO_USE_IN_VALIDATION)
+TRAIN_CSV_PATHS = [['data/toxic_2018/combined.csv', 0.4, False],
+                   ['data/validation.csv', 1., True]]
 OUTPUT_DIR = 'models/kfolds/'
 PRETRAINED_MODEL = 'xlm-roberta-large'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
@@ -175,15 +179,18 @@ def main_driver(fold_id, fold_indices,
     if USE_MULTI_GPU:
         classifier = torch.nn.DataParallel(classifier)
 
-    all_features, all_labels, all_ids = all_tuple
-    # pseudo_features, pseudo_labels, pseudo_ids = pseudo_tuple
+    all_features, all_labels, all_ids, all_val_flag = all_tuple
 
     train_indices, val_indices = fold_indices
     train_features, train_labels = all_features[train_indices], all_labels[train_indices]
-    val_features, val_labels, val_ids = all_features[val_indices], all_labels[val_indices], all_ids[val_indices]
+    val_features, val_labels, val_ids, val_flag = \
+        (all_features[val_indices], all_labels[val_indices], all_ids[val_indices], all_val_flag[val_indices])
+
+    # trim down to those flagged for validation
+    val_features, val_labels, val_ids = (val_features[val_flag], val_labels[val_flag], val_ids[val_flag])
 
     if fold_id == 0:
-        print('train size: {}, val size: {}'.format(len(train_indices), len(val_indices)))
+        print('train size: {}, val size: {}'.format(len(train_indices), len(val_features)))
 
     epoch_eval_score = []
     epoch_val_id_to_pred = []
@@ -228,11 +235,12 @@ def main_driver(fold_id, fold_indices,
 if __name__ == '__main__':
     start_time = time.time()
     print('Using model: {}'.format(PRETRAINED_MODEL))
-    train_tuple = [get_id_text_label_from_csv(curr_path, sample_frac=curr_frac)
-                   for curr_path, curr_frac in TRAIN_CSV_PATHS]
+    train_tuple = [get_id_text_label_from_csv(curr_path, sample_frac=curr_frac, add_label=curr_to_validate)
+                   for curr_path, curr_frac, curr_to_validate in TRAIN_CSV_PATHS]
     all_ids = np.concatenate([x[0] for x in train_tuple])
     all_strings = np.concatenate([x[1] for x in train_tuple])
     all_labels = np.concatenate([x[2] for x in train_tuple])
+    all_val_flag = np.concatenate([x[3] for x in train_tuple])
 
     fold_indices = generate_train_kfolds_indices(all_strings)
 
@@ -249,7 +257,7 @@ if __name__ == '__main__':
     with mp.Pool(MAX_CORES) as p:
         all_features = np.array(p.map(encode_partial, all_strings))
 
-    print(all_ids.shape, all_features.shape, all_labels.shape)
+    print(all_ids.shape, all_features.shape, all_labels.shape, all_val_flag.shape)
 
     print('Starting kfold training')
     with mp.Pool(NUM_GPUS, maxtasksperchild=1) as p:
@@ -260,7 +268,7 @@ if __name__ == '__main__':
         results = p.starmap(main_driver,
                             ((fold_id,
                               curr_fold_indices,
-                              [all_features, all_labels, all_ids],
+                              [all_features, all_labels, all_ids, all_val_flag],
                               gpu_id_queue) for (fold_id, curr_fold_indices) in enumerate(fold_indices)))
 
     mean_score = np.mean(np.stack([x[0] for x in results]), axis=0)
