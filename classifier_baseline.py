@@ -21,8 +21,9 @@ from torch_helpers import EMA, save_model, layerwise_lr_decay
 SAVE_MODEL = True
 USE_AMP = True
 USE_EMA = False
-USE_DISTILL = True # Combines TRAIN_CSV_PATH w/ DISTIL_CSV_PATH
-USE_VAL = False  # Train w/ base + validation datasets, turns off scoring
+USE_DISTILL = True  # Combines TRAIN_CSV_PATH w/ DISTIL_CSV_PATH
+USE_VAL = True  # Train w/ base + validation datasets, turns off scoring
+USE_PSEUDO = False  # Add pseudo labels to training dataset
 USE_MULTI_GPU = False
 USE_LR_DECAY = False
 PRETRAINED_MODEL = 'xlm-roberta-large'
@@ -32,7 +33,8 @@ TRAIN_SAMPLE_FRAC = 0.4  # what % of training data to use
 TRAIN_CSV_PATH = 'data/toxic_2018/train.csv'
 DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
-OUTPUT_DIR = 'models/'
+PSEUDO_CSV_PATH = 'data/test9317.csv'
+OUTPUT_DIR = 'models/train_val'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
@@ -223,6 +225,9 @@ if __name__ == '__main__':
     val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
     _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
 
+    if USE_PSEUDO:
+        pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH, text_col='content')
+
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
     if 'gpt' in PRETRAINED_MODEL:  # GPT2 pre-trained tokenizer doesn't set a padding token
@@ -241,16 +246,23 @@ if __name__ == '__main__':
         train_features = np.array(p.map(encode_partial, train_strings))
         val_raw_features = np.array(p.map(encode_partial, val_raw_strings))
         val_translated_features = np.array(p.map(encode_partial, val_translated_strings))
+        pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
 
     # train_features[:, -1] = special_token
     # val_raw_features[:, -1] = special_token
     # val_translated_features[:, -1] = special_token
     #
     # print(train_features[0])
+
     if USE_VAL:
         train_features = np.concatenate([train_features, val_raw_features])
         train_labels = np.concatenate([train_labels, val_labels])
         train_ids = np.concatenate([train_ids, val_ids])
+
+    if USE_PSEUDO:
+        train_features = np.concatenate([train_features, pseudo_features])
+        train_labels = np.concatenate([train_labels, pseudo_labels])
+        train_ids = np.concatenate([train_ids, pseudo_ids])
 
     print(train_features.shape, val_raw_features.shape, val_translated_features.shape)
 
