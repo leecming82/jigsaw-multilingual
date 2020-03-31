@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
 
@@ -16,7 +17,9 @@ def generate_train_kfolds_indices(input_df):
             seeded_kf.split(range(len(input_df)))]
 
 
-def get_id_text_label_from_csv(csv_path, text_col='comment_text', sample_frac=1.):
+def get_id_text_label_from_csv(csv_path, text_col='comment_text',
+                               sample_frac=1.,
+                               add_label=None):
     """
     Load training data
     :param csv_path: path of csv with 'id' 'comment_text', 'toxic' columns present
@@ -26,7 +29,12 @@ def get_id_text_label_from_csv(csv_path, text_col='comment_text', sample_frac=1.
     raw_df = pd.read_csv(csv_path)
     if sample_frac < 1:
         raw_df = raw_df.sample(frac=sample_frac, random_state=SEED)
-    return raw_df['id'].values, list(raw_df[text_col].values), raw_df['toxic'].values
+    if add_label is None:
+        return raw_df['id'].values, list(raw_df[text_col].values), raw_df['toxic'].values
+    else:
+        return raw_df['id'].values, \
+               list(raw_df[text_col].values), \
+               raw_df['toxic'].values, np.full(raw_df.shape[0], add_label)
 
 
 def get_id_text_toxic_labels_from_csv(csv_path, text_col='comment_text', sample_frac=1.):
@@ -73,5 +81,4 @@ def get_id_text_label_from_csvs(list_csv_path, sample_frac=.1):
 
 
 if __name__ == '__main__':
-    ids, comments, labels = get_id_text_label_from_csvs(['data/jigsaw-toxic-comment-train.csv',
-                                                         'data/jigsaw-unintended-bias-train.csv'])
+    ids, texts, targets = get_id_text_toxic_labels_from_csv('./data/toxic_2018/combined.csv')
