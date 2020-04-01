@@ -1,28 +1,32 @@
-import os
+# Uses multi-gpu to predict list of test data
+# Predicts for every combination of TRAIN_MODEL_PATHS and TESTS_SETS
+# Saves average
 import time
 import multiprocessing as mp
 from functools import partial
+from itertools import product
 import numpy as np
 import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig, WEIGHTS_NAME
 
-TRAINED_MODEL_PATH = 'models/xlm-roberta-large/2'
-TEST_SETS = [['data/test_en.csv', 'content'],
-             ['data/test_en.csv', 'content_en'],
-             ['data/jigsaw_miltilingual_test_translated.csv', 'translated']]
-SUBMIT_CSV_PATH = 'data/submission_xlm2.csv'
+TRAINED_MODEL_PATHS = ['models/trainval-toxic-then-val/xlm-roberta-large/4_100',
+                       'models/trainval-toxic-then-val/xlm-roberta-large/4_200',
+                       'models/trainval-toxic-then-val/xlm-roberta-large/4_300',
+                       'models/trainval-toxic-then-val/xlm-roberta-large/5_100',
+                       'models/trainval-toxic-then-val/xlm-roberta-large/5_200',
+                       'models/trainval-toxic-then-val/xlm-roberta-large/5_300']
+TEST_SETS = [['data/test_en.csv', 'content']]
+SUBMIT_CSV_PATH = 'data/train3val3_6.csv'
+NUM_GPUS = 2
 MAX_CORES = 24
 MAX_SEQ_LEN = 200
 BATCH_SIZE = 24
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 
-os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-
-def get_id_text_from_test_csv(csv_path, text_col):
+def get_id_text_from_test_csv(csv_path,text_col):
     """
     Load training data
     :param csv_path: path of csv with 'id' 'comment_text' columns present
@@ -60,8 +64,8 @@ class ClassifierHead(torch.nn.Module):
         prob = torch.nn.Sigmoid()(logits)
         return prob
 
+
 def predict(model, input_features):
-    print('Predicting test comments')
     preds = []
     model.eval()
     with torch.no_grad():
@@ -74,10 +78,27 @@ def predict(model, input_features):
     return np.concatenate(preds).squeeze()
 
 
+def main_driver(model_path, input_features, gpu_id_queue):
+    use_gpu_id = gpu_id_queue.get()
+    import os
+    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(use_gpu_id)
+    print('Predicting on GPU_ID{} for {} on {}'.format(use_gpu_id, model_path, input_features[0, 0]))
+
+    pretrained_config = AutoConfig.from_pretrained(model_path,
+                                                   output_hidden_states=True)
+    pretrained_base = AutoModel.from_config(pretrained_config)
+    classifier = ClassifierHead(pretrained_base).cuda()
+    classifier.load_state_dict(torch.load(os.path.join(model_path, WEIGHTS_NAME)))
+
+    gpu_id_queue.put(use_gpu_id)
+    return predict(classifier, input_features)
+
+
 start_time = time.time()
 test_set_tuples = [get_id_text_from_test_csv(curr_test_set[0], curr_test_set[1]) for curr_test_set in TEST_SETS]
 
-tokenizer = AutoTokenizer.from_pretrained(TRAINED_MODEL_PATH)
+tokenizer = AutoTokenizer.from_pretrained(TRAINED_MODEL_PATHS[0])
 encode_partial = partial(tokenizer.encode,
                          max_length=MAX_SEQ_LEN,
                          pad_to_max_length=True,
@@ -86,12 +107,24 @@ print('Encoding raw strings into model-specific tokens')
 with mp.Pool(MAX_CORES) as p:
     features = [np.array(p.map(encode_partial, curr_test_set_tuple[1])) for curr_test_set_tuple in test_set_tuples]
 
-pretrained_config = AutoConfig.from_pretrained(TRAINED_MODEL_PATH,
-                                               output_hidden_states=True)
-pretrained_base = AutoModel.from_config(pretrained_config)
-classifier = ClassifierHead(pretrained_base).cuda()
-classifier.load_state_dict(torch.load(os.path.join(TRAINED_MODEL_PATH, WEIGHTS_NAME)))
+model_feature_list = list(product(TRAINED_MODEL_PATHS, features))
 
-test_preds = np.mean(np.stack([predict(classifier, x) for x in features]), 0)
-pd.DataFrame({'id': test_set_tuples[0][0], 'toxic': test_preds}).to_csv(SUBMIT_CSV_PATH, index=False)
+with mp.Pool(NUM_GPUS, maxtasksperchild=1) as p:
+    # prime GPU ID queue with IDs
+    gpu_id_queue = mp.Manager().Queue()
+    [gpu_id_queue.put(i) for i in range(NUM_GPUS)]
+
+    results = p.starmap(main_driver,
+                        ((curr_model_path,
+                          curr_feature,
+                          gpu_id_queue) for curr_model_path, curr_feature in model_feature_list))
+
+print('Generating {} sets of predictions'.format(len(results)))
+# for i, curr_results in enumerate(results):
+#     pd.DataFrame({'id': test_set_tuples[0][0], 'toxic': curr_results}). \
+#         to_csv(SUBMIT_CSV_PATH.format(i), index=False)
+avg_preds = np.mean(np.stack(results), 0)
+pd.DataFrame({'id': test_set_tuples[0][0], 'toxic': avg_preds}) \
+    .to_csv(SUBMIT_CSV_PATH, index=False)
+
 print('Elapsed time: {}'.format(time.time() - start_time))
