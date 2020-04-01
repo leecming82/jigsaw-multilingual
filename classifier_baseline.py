@@ -1,6 +1,7 @@
 """
 Baseline PyTorch classifier for Jigsaw Multilingual
 - Assumes two separate train and val sets (i.e., no need for k-folds)
+- Splits epochs between training the train set and the val set (i.e., 0.5 NUM_EPOCHS each)
 """
 import os
 import time
@@ -22,19 +23,19 @@ SAVE_MODEL = True
 USE_AMP = True
 USE_EMA = False
 USE_DISTILL = True  # Combines TRAIN_CSV_PATH w/ DISTIL_CSV_PATH
-USE_VAL = True  # Train w/ base + validation datasets, turns off scoring
-USE_PSEUDO = True  # Add pseudo labels to training dataset
+USE_VAL = False  # Train w/ base + validation datasets, turns off scoring
+USE_PSEUDO = False  # Add pseudo labels to training dataset
 USE_MULTI_GPU = False
 USE_LR_DECAY = False
 PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = .4  # what % of training data to use
+TRAIN_SAMPLE_FRAC = 1  # what % of training data to use
 # TRAIN_CSV_PATH = 'data/validation_en.csv'
 # DISTIL_CSV_PATH = None
 TRAIN_CSV_PATH = 'data/toxic_2018/train_en.csv'
 DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
 PSEUDO_CSV_PATH = 'data/test9372.csv'
-OUTPUT_DIR = 'models/pl-9372'
+OUTPUT_DIR = 'models/trainval-toxic-then-val'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
@@ -43,6 +44,7 @@ MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncate
 NUM_EPOCHS = 6
 BATCH_SIZE = 24
 ACCUM_FOR = 2
+SAVE_ITER = 100  # save every X iterations
 EMA_DECAY = 0.999
 LR_DECAY_FACTOR = 0.75
 LR_DECAY_START = 1e-3
@@ -82,7 +84,7 @@ class ClassifierHead(torch.nn.Module):
         return prob
 
 
-def train(model, train_tuple, loss_fn, opt, curr_epoch, ema):
+def train(model, config, train_tuple, loss_fn, opt, curr_epoch, ema):
     """ Train """
     # Shuffle train indices for current epoch, batching
     all_features, all_labels, all_ids = train_tuple
@@ -91,12 +93,6 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema):
     shuffle(train_indices)
     train_features = all_features[train_indices]
     train_labels = all_labels[train_indices]
-
-    # switch to finetune - only lower for those > finetune LR
-    # i.e., lower layers might have even smaller LR
-    if curr_epoch == 1:
-        for g in opt.param_groups:
-            g['lr'] = LR_FINETUNE
 
     model.train()
     iter = 0
@@ -134,6 +130,13 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema):
                 for name, param in model.named_parameters():
                     if param.requires_grad:
                         ema.update(name, param.data)
+
+            # Save every specified step (if training on val i.e., >= NUM_EPOCH // 2)
+            if curr_epoch >= NUM_EPOCHS // 2 and iter % SAVE_ITER == 0 and SAVE_MODEL:
+                save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, '{}_{}'.format(curr_epoch, iter)),
+                           model,
+                           config,
+                           tokenizer)
 
 
 def evaluate(model, val_tuple):
@@ -187,18 +190,26 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, tokenizer):
 
     list_raw_auc, list_translated_auc = [], []
 
+    current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
-        train(classifier, train_tuple, loss_fn, opt, curr_epoch, ema)
+        # switch to finetune - only lower for those > finetune LR
+        # i.e., lower layers might have even smaller LR
+        if curr_epoch == 1:
+            print('Switching to fine-tune LR')
+            for g in opt.param_groups:
+                g['lr'] = LR_FINETUNE
+
+        # Switch from toxic-2018 to the current mixed language dataset, halfway thru
+        if curr_epoch == NUM_EPOCHS // 2:
+            current_tuple = val_raw_tuple
+
+        train(classifier, pretrained_config, current_tuple, loss_fn, opt, curr_epoch, ema)
 
         epoch_raw_auc = evaluate(classifier, val_raw_tuple)
         epoch_translated_auc = evaluate(classifier, val_translated_tuple)
         print('Epoch {} - Raw: {:.4f}, Translated: {:.4f}'.format(curr_epoch, epoch_raw_auc, epoch_translated_auc))
         list_raw_auc.append(epoch_raw_auc)
         list_translated_auc.append(epoch_translated_auc)
-
-        if SAVE_MODEL:
-            print('Saving epoch {} model'.format(curr_epoch))
-            save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, str(curr_epoch)), classifier, pretrained_config, tokenizer)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_raw_auc))
