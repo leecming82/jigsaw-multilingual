@@ -18,29 +18,29 @@ from tqdm import trange
 from preprocessor import get_id_text_label_from_csv, get_id_text_distill_label_from_csv
 from torch_helpers import EMA, save_model, layerwise_lr_decay
 
-SAVE_MODEL = False
+SAVE_MODEL = True
 USE_AMP = True
 USE_EMA = False
-USE_DISTILL = False  # Combines TRAIN_CSV_PATH w/ DISTIL_CSV_PATH
-USE_VAL = False  # Train w/ base + validation datasets, turns off scoring
-USE_PSEUDO = False  # Add pseudo labels to training dataset
+USE_DISTILL = True  # Combines TRAIN_CSV_PATH w/ DISTIL_CSV_PATH
+USE_VAL = True  # Train w/ base + validation datasets, turns off scoring
+USE_PSEUDO = True  # Add pseudo labels to training dataset
 USE_MULTI_GPU = False
 USE_LR_DECAY = False
 PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = 1.  # what % of training data to use
-TRAIN_CSV_PATH = 'data/validation_en.csv'
-DISTIL_CSV_PATH = None
-# TRAIN_CSV_PATH = 'data/toxic_2018/train.csv'
-# DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
+TRAIN_SAMPLE_FRAC = .4  # what % of training data to use
+# TRAIN_CSV_PATH = 'data/validation_en.csv'
+# DISTIL_CSV_PATH = None
+TRAIN_CSV_PATH = 'data/toxic_2018/train_en.csv'
+DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
-PSEUDO_CSV_PATH = 'data/test9317.csv'
-OUTPUT_DIR = 'models/train_val'
+PSEUDO_CSV_PATH = 'data/test9372.csv'
+OUTPUT_DIR = 'models/pl-9372'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 5
+NUM_EPOCHS = 6
 BATCH_SIZE = 24
 ACCUM_FOR = 2
 EMA_DECAY = 0.999
@@ -190,12 +190,11 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, tokenizer):
     for curr_epoch in range(NUM_EPOCHS):
         train(classifier, train_tuple, loss_fn, opt, curr_epoch, ema)
 
-        if not USE_VAL:
-            epoch_raw_auc = evaluate(classifier, val_raw_tuple)
-            epoch_translated_auc = evaluate(classifier, val_translated_tuple)
-            print('Epoch {} - Raw: {:.4f}, Translated: {:.4f}'.format(curr_epoch, epoch_raw_auc, epoch_translated_auc))
-            list_raw_auc.append(epoch_raw_auc)
-            list_translated_auc.append(epoch_translated_auc)
+        epoch_raw_auc = evaluate(classifier, val_raw_tuple)
+        epoch_translated_auc = evaluate(classifier, val_translated_tuple)
+        print('Epoch {} - Raw: {:.4f}, Translated: {:.4f}'.format(curr_epoch, epoch_raw_auc, epoch_translated_auc))
+        list_raw_auc.append(epoch_raw_auc)
+        list_translated_auc.append(epoch_translated_auc)
 
         if SAVE_MODEL:
             print('Saving epoch {} model'.format(curr_epoch))
