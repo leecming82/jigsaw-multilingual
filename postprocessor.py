@@ -22,10 +22,16 @@ def generate_pseudo_labels(list_csvs,
     base_df.to_csv(output_csv, index=False)
 
 
+def ensemble_simple_avg_csv(list_csv):
+    base_df = pd.read_csv(list_csv[0]).sort_values('id').set_index('id')
+    for i in range(1, len(list_csv)):
+        base_df['toxic'] += pd.read_csv(list_csv[i]).sort_values('id').set_index('id')['toxic']
+    base_df['toxic'] /= len(list_csv)
+    base_df.reset_index().to_csv('data/ensemble_{}.csv'.format(len(list_csv)), index=False)
+
+
 if __name__ == '__main__':
-    generate_pseudo_labels(['data/test/bert-base-multilingual-cased.csv',
-                            'data/test/bert-base-uncased.csv',
-                            'data/test/bart-large.csv'],
-                           'data/test_en.csv',
-                           'content_en',
-                           'data/pseudo_test.csv')
+    ensemble_simple_avg_csv(['data/submission_train_val_2_avg.csv',
+                             'data/submission_train_val_3_avg.csv',
+                             'data/submission_train_val_4_avg.csv',
+                             'data/submission_train_val_5_avg.csv'])
