@@ -1,7 +1,5 @@
 """
-Baseline PyTorch classifier for Jigsaw Multilingual
-- Assumes two separate train and val sets (i.e., no need for k-folds)
-- Splits epochs between training the train set and the val set (i.e., 0.5 NUM_EPOCHS each)
+Modification of baseline classifier w/ additional unsupervised consistency loss task (UDA)
 """
 import os
 import time
@@ -15,28 +13,31 @@ from transformers import AutoTokenizer, AutoModel, AutoConfig
 from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
-from preprocessor import get_id_text_label_from_csv
+from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import EMA, save_model, layerwise_lr_decay
+from classifier_baseline import evaluate, ClassifierHead
+from classifier_baseline import train as pretrain
 
-SAVE_MODEL = False
+SAVE_MODEL = True
 USE_AMP = True
 USE_EMA = False
-USE_PSEUDO = True  # Add pseudo labels to training dataset
 USE_MULTI_GPU = False
 USE_LR_DECAY = False
 PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = .1  # what % of training data to use
+TRAIN_SAMPLE_FRAC = 1  # what % of training data to use
 TRAIN_CSV_PATH = 'data/toxic_2018/pl_en.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
-PSEUDO_CSV_PATH = 'data/test9426.csv'
-OUTPUT_DIR = 'models/pl9426_highconf'
+UNSUP_RAW_CSV_PATH = 'data/test_en.csv'
+UNSUP_AUG_CSV_PATH = 'data/test_en.csv'
+OUTPUT_DIR = 'models/UDA'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 4  # Half trained using train, half on val (+ PL)
-BATCH_SIZE = 24
+SUP_BATCH_SIZE = 8  # Supervised batch size
+UNSUP_BATCH_SIZE = 16  # Unsupervised batch size
 ACCUM_FOR = 2
 SAVE_ITER = 100  # save every X iterations
 EMA_DECAY = 0.999
@@ -49,71 +50,68 @@ if not USE_MULTI_GPU:
     os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 
-class ClassifierHead(torch.nn.Module):
-    """
-    Bert base with a Linear layer plopped on top of it
-    - connects the max pool of the last hidden layer with the FC
-    """
-
-    def __init__(self, base_model):
-        super(ClassifierHead, self).__init__()
-        self.base_model = base_model
-        self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS, kernel_size=1)
-        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS)
-
-    def forward(self, x, freeze=True):
-        if freeze:
-            with torch.no_grad():
-                hidden_states = self.base_model(x)[0]
-        else:
-            hidden_states = self.base_model(x)[0]
-
-        hidden_states = hidden_states.permute(0, 2, 1)
-        cnn_states = self.cnn(hidden_states)
-        cnn_states = cnn_states.permute(0, 2, 1)
-        logits, _ = torch.max(cnn_states, 1)
-
-        # logits = self.fc(hidden_states[:, 0, :])
-        prob = torch.nn.Sigmoid()(logits)
-        return prob
-
-
-def train(model, config, train_tuple, loss_fn, opt, curr_epoch, ema):
+def train(model, config,
+          train_tuple, supervised_loss_fn,
+          unsupervised_tuple, unsupervised_loss_fn,
+          opt,
+          curr_epoch,
+          ema):
     """ Train """
-    # Shuffle train indices for current epoch, batching
-    all_features, all_labels, all_ids = train_tuple
-    train_indices = list(range(len(all_labels)))
+    # Shuffle supervised samples for current epoch, batching
+    sup_features, sup_labels, _ = train_tuple
+    sup_indices = list(range(len(sup_labels)))
+    shuffle(sup_indices)
+    sup_features, sup_labels = sup_features[sup_indices], sup_labels[sup_indices]
 
-    shuffle(train_indices)
-    train_features = all_features[train_indices]
-    train_labels = all_labels[train_indices]
+    # Shuffle unsupervised samples
+    unsup_raw_features, unsup_aug_features = unsupervised_tuple
+    unsup_indices = list(range(len(unsup_raw_features)))
+    shuffle(unsup_indices)
+    unsup_raw_features, unsup_aug_features = unsup_raw_features[unsup_indices], unsup_aug_features[unsup_indices]
 
     model.train()
     iter = 0
-    running_total_loss = 0
-    with trange(0, len(train_indices), BATCH_SIZE,
-                desc='Epoch {}'.format(curr_epoch)) as t:
-        for batch_idx_start in t:
+    running_supervised_loss = 0
+    running_unsupervised_loss = 0
+    with trange(0, len(sup_indices) // SUP_BATCH_SIZE, desc='{}'.format(curr_epoch)) as t:
+        for curr_batch_index in t:
             iter += 1
-            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(train_indices))
 
-            batch_features = torch.tensor(train_features[batch_idx_start:batch_idx_end]).cuda()
-            batch_labels = torch.tensor(train_labels[batch_idx_start:batch_idx_end]).float().cuda().unsqueeze(-1)
+            # Calculated supervised loss
+            batch_sup_start_idx = SUP_BATCH_SIZE * curr_batch_index
+            batch_sup_idx_end = min(batch_sup_start_idx + SUP_BATCH_SIZE, len(sup_labels))
+            batch_sup_features = torch.tensor(sup_features[batch_sup_start_idx:batch_sup_idx_end]).cuda()
+            batch_sup_labels = torch.tensor(sup_labels[batch_sup_start_idx:batch_sup_idx_end]).float().cuda().unsqueeze(
+                -1)
+            batch_sup_preds = model(batch_sup_features, freeze=False)
+            supervised_loss = supervised_loss_fn(batch_sup_preds, batch_sup_labels)
 
-            if curr_epoch < 1:
-                preds = model(batch_features, freeze=True)
-            else:
-                preds = model(batch_features, freeze=False)
-            loss = loss_fn(preds, batch_labels)
+            # Calculate unsupervised loss
+            batch_unsup_start_idx = UNSUP_BATCH_SIZE * curr_batch_index
+            batch_unsup_idx_end = min(batch_unsup_start_idx + UNSUP_BATCH_SIZE, len(unsup_raw_features))
+            batch_unsup_raw_features = torch.tensor(
+                unsup_raw_features[batch_unsup_start_idx:batch_unsup_idx_end]).cuda()
+            batch_unsup_aug_features = torch.tensor(
+                unsup_aug_features[batch_unsup_start_idx:batch_unsup_idx_end]).cuda()
+            with torch.no_grad():
+                batch_unsup_raw_preds = model(batch_unsup_raw_features, freeze=False)
+                scaled_positive = torch.pow(batch_unsup_raw_preds, 1. / 0.5)
+                denominator = (scaled_positive + torch.pow(1 - batch_unsup_raw_preds, 1. / 0.5))
+                batch_unsup_raw_preds = scaled_positive / denominator
+            batch_unsup_aug_preds = model(batch_unsup_aug_features, freeze=False)
+            unsupervised_loss = unsupervised_loss_fn(batch_unsup_aug_preds, batch_unsup_raw_preds)
+
+            combined_loss = (supervised_loss + unsupervised_loss).mean()
 
             if USE_AMP:
-                with amp.scale_loss(loss, opt) as scaled_loss:
+                with amp.scale_loss(combined_loss, opt) as scaled_loss:
                     scaled_loss.backward()
             else:
-                loss.backward()
+                combined_loss.backward()
 
-            running_total_loss += loss.detach().cpu().numpy()
-            t.set_postfix(loss=running_total_loss / iter)
+            running_supervised_loss += supervised_loss.detach().cpu().numpy()
+            running_unsupervised_loss += unsupervised_loss.detach().cpu().numpy()
+            t.set_postfix(sup_loss=running_supervised_loss / iter, unsup_loss=running_unsupervised_loss / iter)
 
             if iter % ACCUM_FOR == 0:
                 opt.step()
@@ -134,25 +132,7 @@ def train(model, config, train_tuple, loss_fn, opt, curr_epoch, ema):
                            tokenizer)
 
 
-def evaluate(model, val_tuple):
-    # Evaluate validation AUC
-    val_features, val_labels, val_ids = val_tuple
-
-    model.eval()
-    val_preds = []
-    with torch.no_grad():
-        for batch_idx_start in range(0, len(val_ids), BATCH_SIZE):
-            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(val_ids))
-            batch_features = torch.tensor(val_features[batch_idx_start:batch_idx_end]).cuda()
-            batch_preds = model(batch_features)
-            val_preds.append(batch_preds.cpu())
-
-        val_preds = np.concatenate(val_preds)
-        val_roc_auc_score = roc_auc_score(val_labels, val_preds)
-    return val_roc_auc_score
-
-
-def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple, tokenizer):
+def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, unsupervised_tuple, tokenizer):
     pretrained_config = AutoConfig.from_pretrained(PRETRAINED_MODEL,
                                                    output_hidden_states=True)
     pretrained_base = AutoModel.from_pretrained(PRETRAINED_MODEL, config=pretrained_config).cuda()
@@ -166,7 +146,9 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple, 
     else:
         ema = None
 
-    loss_fn = torch.nn.BCELoss()
+    supervised_loss_fn = torch.nn.BCELoss()
+    unsupervised_loss_fn = torch.nn.BCELoss()
+
     if USE_LR_DECAY:
         parameters_update = layerwise_lr_decay(classifier, LR_DECAY_START, LR_DECAY_FACTOR)
         opt = torch.optim.Adam(parameters_update)
@@ -182,7 +164,6 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple, 
 
     list_raw_auc, list_translated_auc = [], []
 
-    current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
         # switch to finetune - only lower for those > finetune LR
         # i.e., lower layers might have even smaller LR
@@ -192,17 +173,22 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple, 
                 g['lr'] = LR_FINETUNE
 
         # Switch from toxic-2018 to the current mixed language dataset, halfway thru
-        if curr_epoch == NUM_EPOCHS // 2:
-            print('Switching to training on validation set')
-            print('Saving base English trained model')
-            save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, 'base_en'),
-                       classifier, pretrained_config, tokenizer)
-            if USE_PSEUDO:
-                current_tuple = pseudo_tuple
-            else:
-                current_tuple = val_raw_tuple
-
-        train(classifier, pretrained_config, current_tuple, loss_fn, opt, curr_epoch, ema)
+        if curr_epoch < NUM_EPOCHS // 2:
+            pretrain(classifier,
+                     pretrained_config,
+                     train_tuple,
+                     supervised_loss_fn,
+                     opt,
+                     curr_epoch,
+                     ema)
+        else:
+            train(classifier,
+                  pretrained_config,
+                  val_raw_tuple, supervised_loss_fn,
+                  unsupervised_tuple, unsupervised_loss_fn,
+                  opt,
+                  curr_epoch,
+                  ema)
 
         epoch_raw_auc = evaluate(classifier, val_raw_tuple)
         epoch_translated_auc = evaluate(classifier, val_translated_tuple)
@@ -237,7 +223,10 @@ if __name__ == '__main__':
     val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
     _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
 
-    pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH, text_col='content')
+    unsup_ids, unsup_raw_strings = get_id_text_from_test_csv(UNSUP_RAW_CSV_PATH, text_col='content')
+    unsup_aug_ids, unsup_aug_strings = get_id_text_from_test_csv(UNSUP_AUG_CSV_PATH, text_col='content_en')
+    assert (unsup_ids == unsup_aug_ids).all()
+    assert len(unsup_raw_strings) == len(unsup_aug_strings)
 
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
@@ -253,21 +242,16 @@ if __name__ == '__main__':
         train_features = np.array(p.map(encode_partial, train_strings))
         val_raw_features = np.array(p.map(encode_partial, val_raw_strings))
         val_translated_features = np.array(p.map(encode_partial, val_translated_strings))
-        pseudo_features = None
-        if USE_PSEUDO:
-            pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
+        unsup_raw_features = np.array(p.map(encode_partial, unsup_raw_strings))
+        unsup_aug_features = np.array(p.map(encode_partial, unsup_aug_strings))
 
-    if USE_PSEUDO:  # so that when we switch, can just use this tuple imeddiately
-        pseudo_features = np.concatenate([val_raw_features, pseudo_features])
-        pseudo_labels = np.concatenate([val_labels, pseudo_labels])
-        pseudo_ids = np.concatenate([val_ids, pseudo_ids])
-
-    print('Train size: {}, val size: {}, pseudo size: {}'.format(len(train_ids), len(val_ids), len(pseudo_ids)))
+    print('Train size: {}, val size: {}, unsupervised size: {}'.format(len(train_ids), len(val_ids),
+                                                                       len(unsup_raw_features)))
 
     main_driver([train_features, train_labels, train_ids],
                 [val_raw_features, val_labels, val_ids],
                 [val_translated_features, val_labels, val_ids],
-                [pseudo_features, pseudo_labels, pseudo_ids],
+                [unsup_raw_features, unsup_aug_features],
                 tokenizer)
 
     print('Elapsed time: {}'.format(time.time() - start_time))
