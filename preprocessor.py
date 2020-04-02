@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
+from functools import lru_cache
 from sklearn.model_selection import KFold
+from scipy.stats import truncnorm
 
 SEED = 1337
 NUM_FOLDS = 4
@@ -35,6 +37,17 @@ def get_id_text_label_from_csv(csv_path, text_col='comment_text',
         return raw_df['id'].values, \
                list(raw_df[text_col].values), \
                raw_df['toxic'].values, np.full(raw_df.shape[0], add_label)
+
+
+def get_id_text_from_test_csv(csv_path, text_col):
+    """
+    Load test data
+    :param csv_path: path of csv with 'id' 'comment_text' columns present
+    :param text_col: column w/ test
+    :return:
+    """
+    raw_pdf = pd.read_csv(csv_path)
+    return raw_pdf['id'].values, list(raw_pdf[text_col].values)
 
 
 def get_id_text_toxic_labels_from_csv(csv_path, text_col='comment_text', sample_frac=1.):
@@ -78,6 +91,34 @@ def get_id_text_label_from_csvs(list_csv_path, sample_frac=.1):
         raw_df = raw_df.sample(frac=sample_frac, random_state=SEED)
     assert raw_df['id'].nunique() == raw_df.shape[0]
     return raw_df['id'].values, list(raw_df['comment_text'].values), raw_df['toxic'].values
+
+
+@lru_cache(maxsize=None)
+def generate_target_dist(mean, num_bins, low, high):
+    """
+    Generate discretized truncated norm prob distribution centered around mean
+    :param mean: center of truncated norm
+    :param num_bins: number of bins
+    :param low: low end of truncated range
+    :param high: top end of truncated range
+    :return: (support, probabilities for support) tuple
+    """
+    radius = 0.5 * (high - low) / num_bins
+
+    def trunc_norm_prob(center):
+        """ get probability mass """
+        return (truncnorm.cdf(center + radius,
+                              a=(low - mean) / radius,
+                              b=(high - mean) / radius,
+                              loc=mean, scale=radius) -
+                truncnorm.cdf(center - radius,
+                              a=(low - mean) / radius,
+                              b=(high - mean) / radius,
+                              loc=mean, scale=radius))
+
+    supports = np.array([x * (2 * radius) + radius + low for x in range(num_bins)])
+    probs = np.array([trunc_norm_prob(support) for support in supports])
+    return supports, probs
 
 
 if __name__ == '__main__':
