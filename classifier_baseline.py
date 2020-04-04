@@ -9,6 +9,7 @@ from itertools import starmap
 from random import shuffle
 from functools import partial
 import multiprocessing as mp
+import pandas as pd
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig
@@ -18,24 +19,24 @@ from tqdm import trange
 from preprocessor import get_id_text_label_from_csv
 from torch_helpers import EMA, save_model, layerwise_lr_decay
 
-SAVE_MODEL = False
+SAVE_MODEL = True
 USE_AMP = True
 USE_EMA = False
 USE_PSEUDO = True  # Add pseudo labels to training dataset
 USE_MULTI_GPU = False
 USE_LR_DECAY = False
 PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = .1  # what % of training data to use
+TRAIN_SAMPLE_FRAC = .4  # what % of training data to use
 TRAIN_CSV_PATH = 'data/toxic_2018/pl_en.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
-PSEUDO_CSV_PATH = 'data/test9426.csv'
-OUTPUT_DIR = 'models/pl9426_highconf'
+PSEUDO_CSV_PATH = 'data/test9432.csv'
+OUTPUT_DIR = 'models/lang_tokens_2'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 4  # Half trained using train, half on val (+ PL)
+NUM_EPOCHS = 6  # Half trained using train, half on val (+ PL)
 BATCH_SIZE = 24
 ACCUM_FOR = 2
 SAVE_ITER = 100  # save every X iterations
@@ -68,12 +69,12 @@ class ClassifierHead(torch.nn.Module):
         else:
             hidden_states = self.base_model(x)[0]
 
-        hidden_states = hidden_states.permute(0, 2, 1)
-        cnn_states = self.cnn(hidden_states)
-        cnn_states = cnn_states.permute(0, 2, 1)
-        logits, _ = torch.max(cnn_states, 1)
+        # hidden_states = hidden_states.permute(0, 2, 1)
+        # cnn_states = self.cnn(hidden_states)
+        # cnn_states = cnn_states.permute(0, 2, 1)
+        # logits, _ = torch.max(cnn_states, 1)
 
-        # logits = self.fc(hidden_states[:, 0, :])
+        logits = self.fc(hidden_states[:, 0, :])
         prob = torch.nn.Sigmoid()(logits)
         return prob
 
@@ -125,13 +126,13 @@ def train(model, config, train_tuple, loss_fn, opt, curr_epoch, ema):
                     if param.requires_grad:
                         ema.update(name, param.data)
 
-            # Save every specified step on last epoch
-            if curr_epoch == NUM_EPOCHS - 1 and iter % SAVE_ITER == 0 and SAVE_MODEL:
-                print('Saving epoch {} model'.format(curr_epoch))
-                save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, '{}_{}'.format(curr_epoch, iter)),
-                           model,
-                           config,
-                           tokenizer)
+    # Save every specified step on last epoch
+    if SAVE_MODEL:
+        print('Saving epoch {} model'.format(curr_epoch))
+        save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, str(curr_epoch)),
+                   model,
+                   config,
+                   tokenizer)
 
 
 def evaluate(model, val_tuple):
@@ -156,6 +157,7 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple, 
     pretrained_config = AutoConfig.from_pretrained(PRETRAINED_MODEL,
                                                    output_hidden_states=True)
     pretrained_base = AutoModel.from_pretrained(PRETRAINED_MODEL, config=pretrained_config).cuda()
+    pretrained_base.resize_token_embeddings(len(tokenizer))
     classifier = ClassifierHead(pretrained_base).cuda()
 
     if USE_EMA:
@@ -192,15 +194,15 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple, 
                 g['lr'] = LR_FINETUNE
 
         # Switch from toxic-2018 to the current mixed language dataset, halfway thru
-        if curr_epoch == NUM_EPOCHS // 2:
-            print('Switching to training on validation set')
-            print('Saving base English trained model')
-            save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, 'base_en'),
-                       classifier, pretrained_config, tokenizer)
-            if USE_PSEUDO:
-                current_tuple = pseudo_tuple
-            else:
-                current_tuple = val_raw_tuple
+        # if curr_epoch == NUM_EPOCHS // 2:
+        #     print('Switching to training on validation set')
+        #     print('Saving base English trained model')
+        #     save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, 'base_en'),
+        #                classifier, pretrained_config, tokenizer)
+        #     if USE_PSEUDO:
+        #         current_tuple = pseudo_tuple
+        #     else:
+        #         current_tuple = val_raw_tuple
 
         train(classifier, pretrained_config, current_tuple, loss_fn, opt, curr_epoch, ema)
 
@@ -239,15 +241,30 @@ if __name__ == '__main__':
 
     pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH, text_col='content')
 
+    # Get languages
+    val_lang = pd.read_csv(VAL_CSV_PATH)['lang'].values
+    pseudo_lang = pd.read_csv(PSEUDO_CSV_PATH)['lang'].values
+
+    train_strings = ['<en><s>' + text + '</s>' for text in train_strings]
+    val_raw_strings = ['<{}><s>'.format(lang) + text + '</s>' for lang, text in zip(val_lang, val_raw_strings)]
+    val_translated_strings = ['<{}><s>'.format(lang) + text + '</s>' for lang, text in
+                              zip(val_lang, val_translated_strings)]
+    pseudo_strings = ['<{}><s>'.format(lang) + text + '</s>' for lang, text in zip(pseudo_lang, pseudo_strings)]
+
+    print(train_strings[100])
+    print(val_raw_strings[200])
+    print(pseudo_strings[300])
+
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
     if 'gpt' in PRETRAINED_MODEL:  # GPT2 pre-trained tokenizer doesn't set a padding token
         tokenizer.add_special_tokens({'pad_token': '<|endoftext|>'})
+    print(tokenizer.add_tokens(['<tr>', '<ru>', '<it>', '<fr>', '<pt>', '<es>', '<en>']))
 
     encode_partial = partial(tokenizer.encode,
                              max_length=MAX_SEQ_LEN,
                              pad_to_max_length=True,
-                             add_special_tokens=True)
+                             add_special_tokens=False)
     print('Encoding raw strings into model-specific tokens')
     with mp.Pool(MAX_CORES) as p:
         train_features = np.array(p.map(encode_partial, train_strings))
@@ -257,10 +274,22 @@ if __name__ == '__main__':
         if USE_PSEUDO:
             pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
 
-    if USE_PSEUDO:  # so that when we switch, can just use this tuple imeddiately
-        pseudo_features = np.concatenate([val_raw_features, pseudo_features])
-        pseudo_labels = np.concatenate([val_labels, pseudo_labels])
-        pseudo_ids = np.concatenate([val_ids, pseudo_ids])
+    print(train_features[0])
+    print(val_raw_features[0])
+
+    # if USE_PSEUDO:  # so that when we switch, can just use this tuple imeddiately
+    #     pseudo_features = np.concatenate([val_raw_features, pseudo_features])
+    #     pseudo_labels = np.concatenate([val_labels, pseudo_labels])
+    #     pseudo_ids = np.concatenate([val_ids, pseudo_ids])
+
+    train_features = np.concatenate([train_features, val_raw_features])
+    train_labels = np.concatenate([train_labels, val_labels])
+    train_ids = np.concatenate([train_ids, val_ids])
+
+    if USE_PSEUDO:
+        train_features = np.concatenate([train_features, pseudo_features])
+        train_labels = np.concatenate([train_labels, pseudo_labels])
+        train_ids = np.concatenate([train_ids, pseudo_ids])
 
     print('Train size: {}, val size: {}, pseudo size: {}'.format(len(train_ids), len(val_ids), len(pseudo_ids)))
 
