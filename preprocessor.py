@@ -7,6 +7,7 @@ from scipy.stats import truncnorm
 SEED = 1337
 NUM_FOLDS = 4
 TOXIC_TARGET_COLS = ['toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
+LANG_MAPPING = {lang: np.identity(7)[i] for i, lang in enumerate(['en', 'tr', 'pt', 'ru', 'fr', 'it', 'es'])}
 
 
 def generate_train_kfolds_indices(input_df):
@@ -122,4 +123,5 @@ def generate_target_dist(mean, num_bins, low, high):
 
 
 if __name__ == '__main__':
-    ids, texts, targets = get_id_text_toxic_labels_from_csv('./data/toxic_2018/combined.csv')
+    # ids, texts, targets = get_id_text_toxic_labels_from_csv('./data/toxic_2018/combined.csv')
+    print(LANG_MAPPING['it'])
