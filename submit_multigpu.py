@@ -10,14 +10,12 @@ import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig, WEIGHTS_NAME
 
-TRAINED_MODEL_PATHS = ['models/trainval-toxic-then-val/xlm-roberta-large/4_100',
-                       'models/trainval-toxic-then-val/xlm-roberta-large/4_200',
-                       'models/trainval-toxic-then-val/xlm-roberta-large/4_300',
-                       'models/trainval-toxic-then-val/xlm-roberta-large/5_100',
-                       'models/trainval-toxic-then-val/xlm-roberta-large/5_200',
-                       'models/trainval-toxic-then-val/xlm-roberta-large/5_300']
+TRAINED_MODEL_PATHS = ['models/lang_tokens/xlm-roberta-large/5',
+                       'models/lang_tokens/xlm-roberta-large/4',
+                       'models/lang_tokens/xlm-roberta-large/3',
+                       'models/lang_tokens/xlm-roberta-large/2']
 TEST_SETS = [['data/test_en.csv', 'content']]
-SUBMIT_CSV_PATH = 'data/train3val3_6.csv'
+SUBMIT_CSV_PATH = 'data/submit9438_langtokens.csv'
 NUM_GPUS = 2
 MAX_CORES = 24
 MAX_SEQ_LEN = 200
@@ -26,14 +24,16 @@ BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 
 
-def get_id_text_from_test_csv(csv_path,text_col):
+def get_id_text_lang_from_test_csv(csv_path, text_col):
     """
-    Load training data
+    Load test data w/ strings updated to include lang token
     :param csv_path: path of csv with 'id' 'comment_text' columns present
+    :param text_col: column w/ test
     :return:
     """
     raw_pdf = pd.read_csv(csv_path)
-    return raw_pdf['id'].values, list(raw_pdf[text_col].values)
+    combined_str = '<' + raw_pdf['lang'] + '><s>' + raw_pdf[text_col] + '</s>'
+    return raw_pdf['id'].values, list(combined_str.values)
 
 
 class ClassifierHead(torch.nn.Module):
@@ -55,12 +55,12 @@ class ClassifierHead(torch.nn.Module):
         else:
             hidden_states = self.base_model(x)[0]
 
-        hidden_states = hidden_states.permute(0, 2, 1)
-        cnn_states = self.cnn(hidden_states)
-        cnn_states = cnn_states.permute(0, 2, 1)
-        logits, _ = torch.max(cnn_states, 1)
+        # hidden_states = hidden_states.permute(0, 2, 1)
+        # cnn_states = self.cnn(hidden_states)
+        # cnn_states = cnn_states.permute(0, 2, 1)
+        # logits, _ = torch.max(cnn_states, 1)
 
-        # logits = self.fc(hidden_states[:, -1, :])
+        logits = self.fc(hidden_states[:, 0, :])
         prob = torch.nn.Sigmoid()(logits)
         return prob
 
@@ -96,16 +96,18 @@ def main_driver(model_path, input_features, gpu_id_queue):
 
 
 start_time = time.time()
-test_set_tuples = [get_id_text_from_test_csv(curr_test_set[0], curr_test_set[1]) for curr_test_set in TEST_SETS]
+test_set_tuples = [get_id_text_lang_from_test_csv(curr_test_set[0], curr_test_set[1]) for curr_test_set in TEST_SETS]
 
 tokenizer = AutoTokenizer.from_pretrained(TRAINED_MODEL_PATHS[0])
 encode_partial = partial(tokenizer.encode,
                          max_length=MAX_SEQ_LEN,
                          pad_to_max_length=True,
-                         add_special_tokens=True)
+                         add_special_tokens=False)
 print('Encoding raw strings into model-specific tokens')
 with mp.Pool(MAX_CORES) as p:
     features = [np.array(p.map(encode_partial, curr_test_set_tuple[1])) for curr_test_set_tuple in test_set_tuples]
+
+print(features[0][:10])
 
 model_feature_list = list(product(TRAINED_MODEL_PATHS, features))
 
