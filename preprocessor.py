@@ -15,7 +15,7 @@ def generate_train_kfolds_indices(input_df):
     Seeded kfolds cross validation indices using just a range(len) call
     :return: (training index, validation index)-tuple list
     """
-    seeded_kf = KFold(n_splits=NUM_FOLDS, random_state=SEED, shuffle=True)
+    seeded_kf = KFold(n_splits=NUM_FOLDS, shuffle=True)
     return [(train_index, val_index) for train_index, val_index in
             seeded_kf.split(range(len(input_df)))]
 
