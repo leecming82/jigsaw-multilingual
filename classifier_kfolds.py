@@ -1,8 +1,7 @@
 """
 Classify w/ k-folds validation
-- for validation, we flag only samples we're interested in at TRAIN_CSV_PATHS
-  since we do not want to factor english language samples
-- Note: we're also k-folding on the base english dataset (better to use all and k-fold only on non-english?)
+- allows user to flag for the OOF chunk - which to ignore (i.e., toxic 2018 samples), which
+  to validate, and which to predict
 """
 import time
 import pandas as pd
@@ -23,20 +22,21 @@ from torch_helpers import EMA, save_model, layerwise_lr_decay
 
 USE_AMP = True
 USE_MULTI_GPU = False
-SAVE_MODEL = True
+SAVE_MODEL = False
 USE_EMA = False
 USE_LR_DECAY = False
-# PATH TUPLE - (PATH, SAMPLE_FRAC, WHETHER_TO_USE_IN_VALIDATION)
-TRAIN_CSV_PATHS = [['data/toxic_2018/combined.csv', 0.4, False],
-                   ['data/validation.csv', 1., True]]
+# PATH TUPLE - (PATH, SAMPLE_FRAC, (0-train, 1-train-val, 2-pred), TEXT-col)
+TRAIN_CSV_PATHS = [['data/test/test9440.csv', 1., 2, 'content'],
+                   ['data/validation.csv', 1., 1, 'comment_text'],
+                   ['data/toxic_2018/pl_en.csv', 0.4, 0, 'comment_text']]
 OUTPUT_DIR = 'models/kfolds/'
 PRETRAINED_MODEL = 'xlm-roberta-large'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
-MAX_CORES = 8  # limit MP calls to use this # cores at most
+MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 INTERMEDIATE_HIDDEN_UNITS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 4
+NUM_EPOCHS = 6
 BATCH_SIZE = 24
 ACCUM_FOR = 2
 EMA_DECAY = 0.999
@@ -143,6 +143,19 @@ def evaluate(model, val_tuple):
     return val_roc_auc_score, val_preds
 
 
+def predict(model, input_features):
+    preds = []
+    model.eval()
+    with torch.no_grad():
+        for batch_idx_start in range(0, len(input_features), BATCH_SIZE):
+            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(input_features))
+            batch_features = torch.tensor(input_features[batch_idx_start:batch_idx_end]).cuda()
+            batch_preds = model(batch_features)
+            preds.append(batch_preds.cpu())
+
+    return np.concatenate(preds).squeeze()
+
+
 def main_driver(fold_id, fold_indices,
                 all_tuple,
                 gpu_id_queue):
@@ -179,21 +192,29 @@ def main_driver(fold_id, fold_indices,
     if USE_MULTI_GPU:
         classifier = torch.nn.DataParallel(classifier)
 
-    all_features, all_labels, all_ids, all_val_flag = all_tuple
+    all_features, all_labels, all_ids, all_flags = all_tuple
 
     train_indices, val_indices = fold_indices
     train_features, train_labels = all_features[train_indices], all_labels[train_indices]
-    val_features, val_labels, val_ids, val_flag = \
-        (all_features[val_indices], all_labels[val_indices], all_ids[val_indices], all_val_flag[val_indices])
+    predval_features, predval_labels, predval_ids, predval_flags = \
+        (all_features[val_indices], all_labels[val_indices], all_ids[val_indices], all_flags[val_indices])
 
     # trim down to those flagged for validation
-    val_features, val_labels, val_ids = (val_features[val_flag], val_labels[val_flag], val_ids[val_flag])
+    val_indices = np.where(predval_flags == 1)
+    val_features, val_labels, val_ids = (
+    predval_features[val_indices], predval_labels[val_indices], predval_ids[val_indices])
+
+    # trim down to those flagged for prediction
+    pred_indices = np.where(predval_flags == 2)
+    pred_features, pred_ids = (predval_features[pred_indices], predval_ids[pred_indices])
 
     if fold_id == 0:
-        print('train size: {}, val size: {}'.format(len(train_indices), len(val_features)))
+        print('train size: {}, val size: {}, pred_size: {}'.format(len(train_indices),
+                                                                   len(val_features),
+                                                                   len(pred_features)))
 
     epoch_eval_score = []
-    epoch_val_id_to_pred = []
+    epoch_id_to_pred = []
     for curr_epoch in range(NUM_EPOCHS):
         # Shuffle train indices for current epoch, batching
         shuffle(train_indices)
@@ -211,9 +232,11 @@ def main_driver(fold_id, fold_indices,
         epoch_auc, val_preds = evaluate(classifier, [val_features, val_labels, val_ids])
         print('Fold {}, Epoch {} - AUC: {:.4f}'.format(fold_id, curr_epoch, epoch_auc))
         epoch_eval_score.append(epoch_auc)
-        epoch_val_id_to_pred.append({val_id: val_pred for val_id, val_pred in zip(val_ids, val_preds)})
 
-        if fold_id == 0:
+        preds = predict(classifier, pred_features)
+        epoch_id_to_pred.append({val_id: val_pred for val_id, val_pred in zip(pred_ids, preds)})
+
+        if fold_id == 0 and SAVE_MODEL:
             print('Saving model')
             save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL), classifier, pretrained_config, tokenizer)
 
@@ -229,14 +252,15 @@ def main_driver(fold_id, fold_indices,
 
     gpu_id_queue.put(use_gpu_id)
     print('Fold {} run-time: {:.4f}'.format(fold_id, time.time() - fold_start_time))
-    return epoch_eval_score, epoch_val_id_to_pred
+    return epoch_eval_score, epoch_id_to_pred
 
 
 if __name__ == '__main__':
     start_time = time.time()
     print('Using model: {}'.format(PRETRAINED_MODEL))
-    train_tuple = [get_id_text_label_from_csv(curr_path, sample_frac=curr_frac, add_label=curr_to_validate)
-                   for curr_path, curr_frac, curr_to_validate in TRAIN_CSV_PATHS]
+    train_tuple = [
+        get_id_text_label_from_csv(curr_path, sample_frac=curr_frac, add_label=curr_to_validate, text_col=curr_text_col)
+        for curr_path, curr_frac, curr_to_validate, curr_text_col in TRAIN_CSV_PATHS]
     all_ids = np.concatenate([x[0] for x in train_tuple])
     all_strings = np.concatenate([x[1] for x in train_tuple])
     all_labels = np.concatenate([x[2] for x in train_tuple])
