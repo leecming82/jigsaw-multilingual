@@ -92,6 +92,7 @@ def train(model, config, train_tuple, loss_fn, opt, curr_epoch):
 
             preds = model(batch_raw_features, batch_translated_features)
             loss = loss_fn(preds, batch_labels)
+            loss = loss / ACCUM_FOR
 
             if USE_AMP:
                 with amp.scale_loss(loss, opt) as scaled_loss:

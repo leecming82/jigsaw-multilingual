@@ -107,6 +107,7 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id
             else:
                 preds = model(batch_features, freeze=False)
             loss = loss_fn(preds, batch_labels)
+            loss = loss / ACCUM_FOR
 
             if USE_AMP:
                 with amp.scale_loss(loss, opt) as scaled_loss:
@@ -202,7 +203,7 @@ def main_driver(fold_id, fold_indices,
     # trim down to those flagged for validation
     val_indices = np.where(predval_flags == 1)
     val_features, val_labels, val_ids = (
-    predval_features[val_indices], predval_labels[val_indices], predval_ids[val_indices])
+        predval_features[val_indices], predval_labels[val_indices], predval_ids[val_indices])
 
     # trim down to those flagged for prediction
     pred_indices = np.where(predval_flags == 2)
@@ -305,9 +306,9 @@ if __name__ == '__main__':
         oof_preds = pd.DataFrame.from_dict(oof_preds, orient='index').reset_index()
         oof_preds.columns = ['id', 'toxic']
         oof_preds.sort_values(by='id') \
-            .to_csv('data/oof/kfolds_{}_{}_{}.csv'.format(PRETRAINED_MODEL,
-                                                          curr_epoch + 1,
-                                                          MAX_SEQ_LEN),
+            .to_csv('data/oof/3_kfolds_{}_{}_{}.csv'.format(PRETRAINED_MODEL,
+                                                            curr_epoch + 1,
+                                                            MAX_SEQ_LEN),
                     index=False)
 
     print('Elapsed time: {}'.format(time.time() - start_time))

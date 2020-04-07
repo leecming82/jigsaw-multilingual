@@ -102,6 +102,7 @@ def train(model, config,
             unsupervised_loss = unsupervised_loss_fn(batch_unsup_aug_preds, batch_unsup_raw_preds)
 
             combined_loss = (supervised_loss + unsupervised_loss).mean()
+            combined_loss = combined_loss / ACCUM_FOR
 
             if USE_AMP:
                 with amp.scale_loss(combined_loss, opt) as scaled_loss:

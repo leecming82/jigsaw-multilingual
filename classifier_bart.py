@@ -108,6 +108,7 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema):
             else:
                 preds = model(batch_features, freeze=False)
             loss = loss_fn(preds, batch_labels)
+            loss = loss / ACCUM_FOR
 
             if USE_AMP:
                 with amp.scale_loss(loss, opt) as scaled_loss:
