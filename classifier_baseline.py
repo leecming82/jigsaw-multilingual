@@ -9,43 +9,43 @@ from itertools import starmap
 from random import shuffle
 from functools import partial
 import multiprocessing as mp
+import pandas as pd
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
-from preprocessor import get_id_text_label_from_csv
+from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import save_model
 from swa import SWA
 
-SAVE_MODEL = True
-USE_AMP = True
+RUN_NAME = 'only9440highconf_975025_2'  # used when writing outputs
+PREDICT = True
 USE_PSEUDO = False  # Add pseudo labels to training dataset
-USE_MULTI_GPU = False
 USE_SWA = False
+SAVE_MODEL = False
+USE_AMP = True
 PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = .05  # what % of training data to use
-TRAIN_CSV_PATH = 'data/translated_2018/combined.csv'
+TRAIN_SAMPLE_FRAC = 1.  # what % of training data to use
+TRAIN_CSV_PATH = 'data/test9440_025_975.csv'
+TEST_CSV_PATH = 'data/test.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
-PSEUDO_CSV_PATH = 'data/test/test9337.csv'
-OUTPUT_DIR = 'models/translated_train_1'
-NUM_GPUS = 2
+PSEUDO_CSV_PATH = 'data/test9440_025_975.csv'
+MODEL_SAVE_DIR = 'models/{}'.format(RUN_NAME)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
-INTERMEDIATE_HIDDEN_UNITS = 1
+NUM_OUTPUTS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 6
 BATCH_SIZE = 16
-ACCUM_FOR = 4
-LR_START = 1e-3
-LR_FINETUNE = 1e-5
-SWA_START_STEP = 1000  # counts only optimizer steps - so note if ACCUM_FOR > 1
+ACCUM_FOR = 2
+LR = 1e-5
+SWA_START_STEP = 2000  # counts only optimizer steps - so note if ACCUM_FOR > 1
 SWA_FREQ = 20
 
-if not USE_MULTI_GPU:
-    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 class ClassifierHead(torch.nn.Module):
@@ -57,15 +57,11 @@ class ClassifierHead(torch.nn.Module):
     def __init__(self, base_model):
         super(ClassifierHead, self).__init__()
         self.base_model = base_model
-        self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS, kernel_size=1)
-        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS)
+        self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, NUM_OUTPUTS, kernel_size=1)
+        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, NUM_OUTPUTS)
 
-    def forward(self, x, freeze=False):
-        if freeze:
-            with torch.no_grad():
-                hidden_states = self.base_model(x)[0]
-        else:
-            hidden_states = self.base_model(x)[0]
+    def forward(self, x):
+        hidden_states = self.base_model(x)[0]
         hidden_states = hidden_states.permute(0, 2, 1)
         cnn_states = self.cnn(hidden_states)
         cnn_states = cnn_states.permute(0, 2, 1)
@@ -98,10 +94,7 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch):
             batch_features = torch.tensor(train_features[batch_idx_start:batch_idx_end]).cuda()
             batch_labels = torch.tensor(train_labels[batch_idx_start:batch_idx_end]).float().cuda().unsqueeze(-1)
 
-            if curr_epoch == 0:
-                preds = model(batch_features, freeze=True)
-            else:
-                preds = model(batch_features, freeze=False)
+            preds = model(batch_features)
             loss = loss_fn(preds, batch_labels)
             loss = loss / ACCUM_FOR
 
@@ -119,32 +112,39 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch):
                 opt.zero_grad()
 
 
-def evaluate(model, val_tuple):
+def predict_evaluate(model, data_tuple, epoch, score=False):
     # Evaluate validation AUC
-    val_features, val_labels, val_ids = val_tuple
-
-    model.eval()
+    val_score = None
     val_preds = []
+    model.eval()
     with torch.no_grad():
-        for batch_idx_start in range(0, len(val_ids), BATCH_SIZE):
-            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(val_ids))
-            batch_features = torch.tensor(val_features[batch_idx_start:batch_idx_end]).cuda()
+        for batch_idx_start in range(0, len(data_tuple[-1]), BATCH_SIZE):
+            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(data_tuple[-1]))
+            batch_features = torch.tensor(data_tuple[0][batch_idx_start:batch_idx_end]).cuda()
             batch_preds = model(batch_features)
-            val_preds.append(batch_preds.cpu())
+            val_preds.append(batch_preds.cpu().numpy().squeeze())
 
-        val_preds = np.concatenate(val_preds)
-        val_roc_auc_score = roc_auc_score(val_labels, val_preds)
-    return val_roc_auc_score
+    val_preds = np.concatenate(val_preds)
+    if score:
+        val_score = roc_auc_score(data_tuple[1], val_preds)
+
+    save_folder = 'validation' if score else 'test'
+    pd.DataFrame({'id': data_tuple[-1], 'toxic': val_preds}) \
+        .to_csv('data/outputs/{}/{}_{}.csv'.format(save_folder,
+                                                   RUN_NAME,
+                                                   epoch),
+                index=False)
+
+    return val_score
 
 
-def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, tokenizer):
+def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
     pretrained_config = AutoConfig.from_pretrained(PRETRAINED_MODEL,
                                                    output_hidden_states=True)
     pretrained_base = AutoModel.from_pretrained(PRETRAINED_MODEL, config=pretrained_config).cuda()
     classifier = ClassifierHead(pretrained_base).cuda()
-
     loss_fn = torch.nn.BCELoss()
-    opt = torch.optim.AdamW(classifier.parameters(), lr=LR_START)
+    opt = torch.optim.Adam(classifier.parameters(), lr=LR)
 
     if USE_SWA:
         opt = SWA(opt, swa_start=SWA_START_STEP, swa_freq=SWA_FREQ)
@@ -153,40 +153,36 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, tokenizer):
         amp.register_float_function(torch, 'sigmoid')
         classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
 
-    if USE_MULTI_GPU:
-        classifier = torch.nn.DataParallel(classifier)
-
-    list_raw_auc, list_translated_auc = [], []
+    list_raw_auc = []
 
     current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
-        if curr_epoch == 1:
-            for g in opt.param_groups:
-                g['lr'] = LR_FINETUNE
-
+        # if curr_epoch >= NUM_EPOCHS // 2:
+        #     current_tuple = val_tuple
         train(classifier, current_tuple, loss_fn, opt, curr_epoch)
 
-        epoch_raw_auc = evaluate(classifier, val_raw_tuple)
-        epoch_translated_auc = evaluate(classifier, val_translated_tuple)
-        print('Epoch {} - Raw: {:.4f}, Translated: {:.4f}'.format(curr_epoch, epoch_raw_auc, epoch_translated_auc))
+        epoch_raw_auc = predict_evaluate(classifier, val_tuple, curr_epoch, score=True)
+        print('Epoch {} - Raw: {:.4f}'.format(curr_epoch, epoch_raw_auc))
         list_raw_auc.append(epoch_raw_auc)
-        list_translated_auc.append(epoch_translated_auc)
+
+        if PREDICT:
+            predict_evaluate(classifier, test_tuple, curr_epoch)
 
         if SAVE_MODEL:
-            save_model(os.path.join(OUTPUT_DIR, str(curr_epoch)), classifier, pretrained_config, tokenizer)
+            save_model(os.path.join(MODEL_SAVE_DIR, str(curr_epoch)), classifier, pretrained_config, tokenizer)
 
-        if USE_SWA:
-            opt.swap_swa_sgd()
-            epoch_raw_auc = evaluate(classifier, val_raw_tuple)
-            epoch_translated_auc = evaluate(classifier, val_translated_tuple)
-            print('SWA - Raw: {:.4f}, Translated: {:.4f}'.format(epoch_raw_auc, epoch_translated_auc))
-            list_raw_auc.append(epoch_raw_auc)
-            list_translated_auc.append(epoch_translated_auc)
-            save_model(os.path.join(OUTPUT_DIR, 'SWA'), classifier, pretrained_config, tokenizer)
+    if USE_SWA:
+        opt.swap_swa_sgd()
+        epoch_raw_auc = predict_evaluate(classifier, val_tuple, 'SWA', score=True)
+        print('SWA - Raw: {:.4f}'.format(epoch_raw_auc))
+        list_raw_auc.append(epoch_raw_auc)
+        if SAVE_MODEL:
+            save_model(os.path.join(MODEL_SAVE_DIR, 'SWA'), classifier, pretrained_config, tokenizer)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_raw_auc))
-        print(np.array(list_translated_auc))
+
+    pd.DataFrame({'val_auc': list_raw_auc}).to_csv('data/outputs/results/{}.csv'.format(RUN_NAME), index=False)
 
 
 if __name__ == '__main__':
@@ -194,19 +190,17 @@ if __name__ == '__main__':
 
     # Load train, validation, and pseudo-label data
     train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
-                                                                        text_col='comment_text',
+                                                                        text_col='content',
                                                                         sample_frac=TRAIN_SAMPLE_FRAC)
 
-    val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
-    _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
+    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
 
     pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH, text_col='content')
 
+    test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='content')
+
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
-    if 'gpt' in PRETRAINED_MODEL:  # GPT2 pre-trained tokenizer doesn't set a padding token
-        tokenizer.add_special_tokens({'pad_token': '<|endoftext|>'})
-
     encode_partial = partial(tokenizer.encode,
                              max_length=MAX_SEQ_LEN,
                              pad_to_max_length=True,
@@ -214,15 +208,12 @@ if __name__ == '__main__':
     print('Encoding raw strings into model-specific tokens')
     with mp.Pool(MAX_CORES) as p:
         train_features = np.array(p.map(encode_partial, train_strings))
-        val_raw_features = np.array(p.map(encode_partial, val_raw_strings))
-        val_translated_features = np.array(p.map(encode_partial, val_translated_strings))
+        val_features = np.array(p.map(encode_partial, val_strings))
+        test_features = np.array(p.map(encode_partial, test_strings))
         pseudo_features = None
         if USE_PSEUDO:
             pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
 
-    # train_features = np.concatenate([train_features, val_raw_features])
-    # train_labels = np.concatenate([train_labels, val_labels])
-    # train_ids = np.concatenate([train_ids, val_ids])
     if USE_PSEUDO:
         train_features = np.concatenate([train_features, pseudo_features])
         train_labels = np.concatenate([train_labels, pseudo_labels])
@@ -233,8 +224,8 @@ if __name__ == '__main__':
                                                             train_labels[train_labels == 0].shape))
 
     main_driver([train_features, train_labels, train_ids],
-                [val_raw_features, val_labels, val_ids],
-                [val_translated_features, val_labels, val_ids],
+                [val_features, val_labels, val_ids],
+                [test_features, test_ids],
                 tokenizer)
 
     print('Elapsed time: {}'.format(time.time() - start_time))

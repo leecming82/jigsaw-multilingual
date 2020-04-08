@@ -2,6 +2,7 @@
 Classify w/ k-folds validation
 - allows user to flag for the OOF chunk - which to ignore (i.e., toxic 2018 samples), which
   to validate, and which to predict
+- note that you should flag the entire test set for prediction (can't point to a subset)
 """
 import time
 import pandas as pd
@@ -16,33 +17,24 @@ from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
 from preprocessor import (generate_train_kfolds_indices,
-                          get_id_text_distill_label_from_csv,
-                          get_id_text_label_from_csv)
-from torch_helpers import EMA, save_model, layerwise_lr_decay
+                          get_id_text_label_from_csv,
+                          get_id_text_from_test_csv)
 
+RUN_NAME = 'cv_all9940'
 USE_AMP = True
-USE_MULTI_GPU = False
-SAVE_MODEL = False
-USE_EMA = False
-USE_LR_DECAY = False
 # PATH TUPLE - (PATH, SAMPLE_FRAC, (0-train, 1-train-val, 2-pred), TEXT-col)
-TRAIN_CSV_PATHS = [['data/test/test9440.csv', 1., 2, 'content'],
-                   ['data/validation.csv', 1., 1, 'comment_text'],
-                   ['data/toxic_2018/pl_en.csv', 0.4, 0, 'comment_text']]
-OUTPUT_DIR = 'models/kfolds/'
+TRAIN_CSV_PATHS = [['data/submissions/test9440.csv', 1., 2, 'content'],
+                   ['data/validation.csv', 1., 1, 'comment_text']]
 PRETRAINED_MODEL = 'xlm-roberta-large'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
-INTERMEDIATE_HIDDEN_UNITS = 1
+NUM_OUTPUTS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 6
-BATCH_SIZE = 24
+BATCH_SIZE = 16
 ACCUM_FOR = 2
-EMA_DECAY = 0.999
-LR_DECAY_FACTOR = 0.75
-LR_DECAY_START = 1e-3
-LR_FINETUNE = 1e-5
+LR = 1e-5
 
 
 class ClassifierHead(torch.nn.Module):
@@ -54,16 +46,11 @@ class ClassifierHead(torch.nn.Module):
     def __init__(self, base_model):
         super(ClassifierHead, self).__init__()
         self.base_model = base_model
-        self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS, kernel_size=1)
-        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS)
+        self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, NUM_OUTPUTS, kernel_size=1)
+        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, NUM_OUTPUTS)
 
-    def forward(self, x, freeze=True):
-        if freeze:
-            with torch.no_grad():
-                hidden_states = self.base_model(x)[0]
-        else:
-            hidden_states = self.base_model(x)[0]
-
+    def forward(self, x):
+        hidden_states = self.base_model(x)[0]
         hidden_states = hidden_states.permute(0, 2, 1)
         cnn_states = self.cnn(hidden_states)
         cnn_states = cnn_states.permute(0, 2, 1)
@@ -74,7 +61,7 @@ class ClassifierHead(torch.nn.Module):
         return prob
 
 
-def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id):
+def train(model, train_tuple, loss_fn, opt, curr_epoch, use_gpu_id, fold_id):
     """ Train """
     # Shuffle train indices for current epoch, batching
     all_features, all_labels, _ = train_tuple
@@ -83,12 +70,6 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id
     shuffle(train_indices)
     train_features = all_features[train_indices]
     train_labels = all_labels[train_indices]
-
-    # switch to finetune - only lower for those > finetune LR
-    # i.e., lower layers might have even smaller LR
-    if curr_epoch == 1:
-        for g in opt.param_groups:
-            g['lr'] = LR_FINETUNE
 
     model.train()
     iter = 0
@@ -102,10 +83,7 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id
             batch_features = torch.tensor(train_features[batch_idx_start:batch_idx_end]).cuda()
             batch_labels = torch.tensor(train_labels[batch_idx_start:batch_idx_end]).float().cuda().unsqueeze(-1)
 
-            if curr_epoch < 1:
-                preds = model(batch_features, freeze=True)
-            else:
-                preds = model(batch_features, freeze=False)
+            preds = model(batch_features)
             loss = loss_fn(preds, batch_labels)
             loss = loss / ACCUM_FOR
 
@@ -118,12 +96,6 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, ema, use_gpu_id, fold_id
             if iter % ACCUM_FOR == 0:
                 opt.step()
                 opt.zero_grad()
-
-            if USE_EMA:
-                # Update EMA shadow parameters on every back pass
-                for name, param in model.named_parameters():
-                    if param.requires_grad:
-                        ema.update(name, param.data)
 
 
 def evaluate(model, val_tuple):
@@ -171,27 +143,12 @@ def main_driver(fold_id, fold_indices,
     pretrained_base = AutoModel.from_pretrained(PRETRAINED_MODEL, config=pretrained_config).cuda()
     classifier = ClassifierHead(pretrained_base).cuda()
 
-    if USE_EMA:
-        ema = EMA(EMA_DECAY)
-        for name, param in classifier.named_parameters():
-            if param.requires_grad:
-                ema.register(name, param.data)
-    else:
-        ema = None
-
     loss_fn = torch.nn.BCELoss()
-    if USE_LR_DECAY:
-        parameters_update = layerwise_lr_decay(classifier, LR_DECAY_START, LR_DECAY_FACTOR)
-        opt = torch.optim.Adam(parameters_update)
-    else:
-        opt = torch.optim.Adam(classifier.parameters(), lr=LR_DECAY_START)
+    opt = torch.optim.Adam(classifier.parameters(), lr=LR)
 
     if USE_AMP:
         amp.register_float_function(torch, 'sigmoid')
         classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
-
-    if USE_MULTI_GPU:
-        classifier = torch.nn.DataParallel(classifier)
 
     all_features, all_labels, all_ids, all_flags = all_tuple
 
@@ -205,14 +162,14 @@ def main_driver(fold_id, fold_indices,
     val_features, val_labels, val_ids = (
         predval_features[val_indices], predval_labels[val_indices], predval_ids[val_indices])
 
-    # trim down to those flagged for prediction
-    pred_indices = np.where(predval_flags == 2)
-    pred_features, pred_ids = (predval_features[pred_indices], predval_ids[pred_indices])
+    test_indices = np.where(predval_flags == 2)
+    test_features, test_labels, test_ids = (
+        predval_features[test_indices], predval_labels[test_indices], predval_ids[test_indices])
 
     if fold_id == 0:
         print('train size: {}, val size: {}, pred_size: {}'.format(len(train_indices),
                                                                    len(val_features),
-                                                                   len(pred_features)))
+                                                                   len(test_features)))
 
     epoch_eval_score = []
     epoch_id_to_pred = []
@@ -225,7 +182,6 @@ def main_driver(fold_id, fold_indices,
               loss_fn,
               opt,
               curr_epoch,
-              ema,
               use_gpu_id,
               fold_id)
 
@@ -233,23 +189,8 @@ def main_driver(fold_id, fold_indices,
         epoch_auc, val_preds = evaluate(classifier, [val_features, val_labels, val_ids])
         print('Fold {}, Epoch {} - AUC: {:.4f}'.format(fold_id, curr_epoch, epoch_auc))
         epoch_eval_score.append(epoch_auc)
-
-        preds = predict(classifier, pred_features)
-        epoch_id_to_pred.append({val_id: val_pred for val_id, val_pred in zip(pred_ids, preds)})
-
-        if fold_id == 0 and SAVE_MODEL:
-            print('Saving model')
-            save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL), classifier, pretrained_config, tokenizer)
-
-    if USE_EMA and SAVE_MODEL and fold_id == 0:
-        # Load EMA parameters and evaluate once again
-        for name, param in classifier.named_parameters():
-            if param.requires_grad:
-                param.data = ema.get(name)
-        epoch_auc = evaluate(classifier, [val_features, val_labels, val_ids])
-        print('EMA ->Fold {}, Epoch {} - AUC: {:.4f}'.format(fold_id, curr_epoch, epoch_auc))
-        save_model(os.path.join(OUTPUT_DIR, '{}_ema'.format(PRETRAINED_MODEL)), classifier, pretrained_config,
-                   tokenizer)
+        preds = predict(classifier, test_features)
+        epoch_id_to_pred.append({val_id: val_pred for val_id, val_pred in zip(test_ids, preds)})
 
     gpu_id_queue.put(use_gpu_id)
     print('Fold {} run-time: {:.4f}'.format(fold_id, time.time() - fold_start_time))
@@ -282,8 +223,6 @@ if __name__ == '__main__':
     with mp.Pool(MAX_CORES) as p:
         all_features = np.array(p.map(encode_partial, all_strings))
 
-    print(all_ids.shape, all_features.shape, all_labels.shape, all_val_flag.shape)
-
     print('Starting kfold training')
     with mp.Pool(NUM_GPUS, maxtasksperchild=1) as p:
         # prime GPU ID queue with IDs
@@ -299,6 +238,7 @@ if __name__ == '__main__':
     mean_score = np.mean(np.stack([x[0] for x in results]), axis=0)
     with np.printoptions(precision=4, suppress=True):
         print('Mean fold ROC_AUC_SCORE: {}'.format(mean_score))
+    pd.DataFrame({'val_auc': mean_score}).to_csv('data/outputs/results/{}.csv'.format(RUN_NAME), index=False)
 
     for curr_epoch in range(NUM_EPOCHS):
         oof_preds = {}
@@ -306,9 +246,8 @@ if __name__ == '__main__':
         oof_preds = pd.DataFrame.from_dict(oof_preds, orient='index').reset_index()
         oof_preds.columns = ['id', 'toxic']
         oof_preds.sort_values(by='id') \
-            .to_csv('data/oof/3_kfolds_{}_{}_{}.csv'.format(PRETRAINED_MODEL,
-                                                            curr_epoch + 1,
-                                                            MAX_SEQ_LEN),
+            .to_csv('data/outputs/test/kfolds_{}_{}.csv'.format(RUN_NAME,
+                                                                curr_epoch),
                     index=False)
 
     print('Elapsed time: {}'.format(time.time() - start_time))
