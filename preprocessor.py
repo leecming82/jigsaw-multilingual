@@ -22,16 +22,38 @@ def generate_train_kfolds_indices(input_df):
 
 def get_id_text_label_from_csv(csv_path, text_col='comment_text',
                                sample_frac=1.,
-                               add_label=None):
+                               add_label=None,
+                               lang=None):
     """
     Load training data
+    """
+    raw_df = pd.read_csv(csv_path)
+    if lang is not None:
+        raw_df = raw_df[raw_df['lang'] == lang]
+    if sample_frac < 1:
+        raw_df = raw_df.sample(frac=sample_frac)
+    if add_label is None:
+        return raw_df['id'].values, list(raw_df[text_col].values), raw_df['toxic'].values
+    else:
+        return raw_df['id'].values, \
+               list(raw_df[text_col].values), \
+               raw_df['toxic'].values, np.full(raw_df.shape[0], add_label)
+
+
+def get_balanced_id_text_label_from_csv(csv_path, text_col='comment_text',
+                                        sample=None,
+                                        add_label=None):
+    """
+    Load balanced dataset - 0.5 * sample from positives, 0.5 from negatives w/ replacement
     :param csv_path: path of csv with 'id' 'comment_text', 'toxic' columns present
-    :param text_col: specify the text col name (for translations)
+    :param sample: NUMBER of samples to draw
     :return:
     """
     raw_df = pd.read_csv(csv_path)
-    if sample_frac < 1:
-        raw_df = raw_df.sample(frac=sample_frac)
+    if sample is not None:
+        positive_df, negative_df = raw_df[raw_df.toxic == 1], raw_df[raw_df.toxic == 0]
+        raw_df = pd.concat([positive_df.sample(n=sample//2, replace=True),
+                            negative_df.sample(n=sample//2, replace=True)])
     if add_label is None:
         return raw_df['id'].values, list(raw_df[text_col].values), raw_df['toxic'].values
     else:
@@ -59,7 +81,7 @@ def get_id_text_toxic_labels_from_csv(csv_path, text_col='comment_text', sample_
     """
     raw_df = pd.read_csv(csv_path)
     if sample_frac < 1:
-        raw_df = raw_df.sample(frac=sample_frac, random_state=SEED)
+        raw_df = raw_df.sample(frac=sample_frac)
     return raw_df['id'].values, list(raw_df[text_col].values), raw_df[TOXIC_TARGET_COLS].values
 
 
@@ -73,25 +95,12 @@ def get_id_text_distill_label_from_csv(train_path, distill_path, text_col='comme
     """
     raw_df = pd.read_csv(train_path)
     if sample_frac < 1:
-        raw_df = raw_df.sample(frac=sample_frac, random_state=SEED)
+        raw_df = raw_df.sample(frac=sample_frac)
     distill_df = pd.read_csv(distill_path).set_index('id')
     distill_df = distill_df.loc[raw_df['id']]
     return (raw_df['id'].values,
             list(raw_df[text_col].values),
             distill_df['toxic'].values)
-
-
-def get_id_text_label_from_csvs(list_csv_path, sample_frac=.1):
-    """
-    Load training data from multiple csvs
-    :param csv_path: list of csv with 'id' 'comment_text', 'toxic' columns present
-    :return:
-    """
-    raw_df = pd.concat([pd.read_csv(csv_path)[['id', 'comment_text', 'toxic']] for csv_path in list_csv_path])
-    if sample_frac < 1:
-        raw_df = raw_df.sample(frac=sample_frac, random_state=SEED)
-    assert raw_df['id'].nunique() == raw_df.shape[0]
-    return raw_df['id'].values, list(raw_df['comment_text'].values), raw_df['toxic'].values
 
 
 @lru_cache(maxsize=None)
@@ -123,5 +132,5 @@ def generate_target_dist(mean, num_bins, low, high):
 
 
 if __name__ == '__main__':
-    # ids, texts, targets = get_id_text_toxic_labels_from_csv('./data/toxic_2018/combined.csv')
-    print(LANG_MAPPING['it'])
+    ids, strings, labels = get_balanced_id_text_label_from_csv('data/translated_2018/combined.csv', sample=100)
+    print(pd.DataFrame({'id': ids, 'label': labels}))
