@@ -73,36 +73,6 @@ def get_id_text_from_test_csv(csv_path, text_col):
     return raw_pdf['id'].values, list(raw_pdf[text_col].values)
 
 
-def get_id_text_toxic_labels_from_csv(csv_path, text_col='comment_text', sample_frac=1.):
-    """
-    Load training data w/ all 6 toxic targets e.g., toxic, severe_toxic etc.
-    :param csv_path: path of csv with 'id' 'comment_text', 'toxic' columns present
-    :return:
-    """
-    raw_df = pd.read_csv(csv_path)
-    if sample_frac < 1:
-        raw_df = raw_df.sample(frac=sample_frac)
-    return raw_df['id'].values, list(raw_df[text_col].values), raw_df[TOXIC_TARGET_COLS].values
-
-
-def get_id_text_distill_label_from_csv(train_path, distill_path, text_col='comment_text', sample_frac=1.):
-    """
-    Load training data together with distillation labels
-    :param train_path: path with original labels
-    :param distill_path: path distill labels
-    :param text_col: specify the text col name (for translations)
-    :return:
-    """
-    raw_df = pd.read_csv(train_path)
-    if sample_frac < 1:
-        raw_df = raw_df.sample(frac=sample_frac)
-    distill_df = pd.read_csv(distill_path).set_index('id')
-    distill_df = distill_df.loc[raw_df['id']]
-    return (raw_df['id'].values,
-            list(raw_df[text_col].values),
-            distill_df['toxic'].values)
-
-
 @lru_cache(maxsize=None)
 def generate_target_dist(mean, num_bins, low, high):
     """

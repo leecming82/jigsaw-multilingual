@@ -10,19 +10,15 @@ import tensorflow.keras.layers as layers
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import Model
 from sklearn.metrics import roc_auc_score
-from preprocessor import get_id_text_label_from_csv, get_id_text_distill_label_from_csv
+from preprocessor import get_id_text_label_from_csv
 
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 SAVE_MODEL = False
-USE_DISTILL = True
 USE_MODEL_PATH = './models/use_ml/large'
 PRETRAINED_MODEL = 'distilbert-base-uncased'
-# TRAIN_CSV_PATH = 'data/jigsaw-toxic-comment-train.csv'
-# DISTIL_CSV_PATH = None
-TRAIN_CSV_PATH = 'data/toxic_2018/train.csv'
-DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
+TRAIN_CSV_PATH = 'data/toxic_2018/pl_en.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
 OUTPUT_DIR = 'models/'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
@@ -72,10 +68,7 @@ if __name__ == '__main__':
 
     embed = tf.saved_model.load(USE_MODEL_PATH)
 
-    if USE_DISTILL:
-        train_ids, train_strings, train_labels = get_id_text_distill_label_from_csv(TRAIN_CSV_PATH, DISTIL_CSV_PATH)
-    else:
-        train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH)
+    train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH, text_col='comment_text')
     val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
     _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
 

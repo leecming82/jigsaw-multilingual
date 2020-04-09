@@ -12,20 +12,16 @@ from transformers import AutoTokenizer, AutoModel, AutoConfig, WEIGHTS_NAME, CON
 from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
-from preprocessor import get_id_text_label_from_csv, get_id_text_distill_label_from_csv
+from preprocessor import get_id_text_label_from_csv
 from torch_helpers import EMA, save_model
 
 SAVE_MODEL = True
 USE_AMP = True
 USE_EMA = False
-USE_DISTILL = True
 USE_MULTI_GPU = False
 USE_MODEL_PATH = './models/use_ml/medium'
 PRETRAINED_MODEL = 'distilbert-base-uncased'
-# TRAIN_CSV_PATH = 'data/jigsaw-toxic-comment-train.csv'
-# DISTIL_CSV_PATH = None
-TRAIN_CSV_PATH = 'data/toxic_2018/train.csv'
-DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
+TRAIN_CSV_PATH = 'data/toxic_2018/pl_en.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
 OUTPUT_DIR = 'models/'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
@@ -206,10 +202,7 @@ def generate_use_embeddings(input_strings, batch_size=128):
 if __name__ == '__main__':
     start_time = time.time()
 
-    if USE_DISTILL:
-        train_ids, train_strings, train_labels = get_id_text_distill_label_from_csv(TRAIN_CSV_PATH, DISTIL_CSV_PATH)
-    else:
-        train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH)
+    train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH, text_col='comment_text')
     val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
     _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
 

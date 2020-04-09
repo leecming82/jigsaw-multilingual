@@ -18,13 +18,12 @@ from apex import amp
 from tqdm import trange
 import sentencepiece as spm
 from fairseq.models.bart import BARTModel
-from preprocessor import get_id_text_label_from_csv, get_id_text_distill_label_from_csv
+from preprocessor import get_id_text_label_from_csv
 from torch_helpers import EMA, layerwise_lr_decay
 
 SAVE_MODEL = False
 USE_AMP = True
 USE_EMA = False
-USE_DISTILL = True  # Combines TRAIN_CSV_PATH w/ DISTIL_CSV_PATH
 USE_VAL = False  # Train w/ base + validation datasets, turns off scoring
 USE_PSEUDO = False  # Add pseudo labels to training dataset
 USE_MULTI_GPU = False
@@ -32,10 +31,7 @@ USE_LR_DECAY = False
 PRETRAINED_MODEL = 'models/cc25_pretrain'
 PRETRAINED_SPM = 'models/cc25_pretrain/sentence.bpe.model'
 TRAIN_SAMPLE_FRAC = 1  # what % of training data to use
-# TRAIN_CSV_PATH = 'data/validation_en.csv'
-# DISTIL_CSV_PATH = None
-TRAIN_CSV_PATH = 'data/toxic_2018/train_en.csv'
-DISTIL_CSV_PATH = 'data/toxic_2018/ensemble_3.csv'
+TRAIN_CSV_PATH = 'data/toxic_2018/pl_en.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
 PSEUDO_CSV_PATH = 'data/test9383_highconfidence.csv'
 OUTPUT_DIR = 'models/high_conf_9383'
@@ -204,14 +200,9 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple):
 if __name__ == '__main__':
     start_time = time.time()
 
-    if USE_DISTILL:
-        train_ids, train_strings, train_labels = get_id_text_distill_label_from_csv(TRAIN_CSV_PATH,
-                                                                                    DISTIL_CSV_PATH,
-                                                                                    sample_frac=TRAIN_SAMPLE_FRAC)
-    else:
-        train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
-                                                                            text_col='comment_text_en',
-                                                                            sample_frac=TRAIN_SAMPLE_FRAC)
+    train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
+                                                                        text_col='comment_text',
+                                                                        sample_frac=TRAIN_SAMPLE_FRAC)
     val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
     _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
 
