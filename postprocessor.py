@@ -27,11 +27,21 @@ def ensemble_simple_avg_csv(list_csv):
     for i in range(1, len(list_csv)):
         base_df['toxic'] += pd.read_csv(list_csv[i]).sort_values('id').set_index('id')['toxic']
     base_df['toxic'] /= len(list_csv)
-    base_df.reset_index().to_csv('data/ensemble_{}.csv'.format(len(list_csv)), index=False)
+    base_df.reset_index().to_csv('data/it_{}.csv'.format(len(list_csv)), index=False)
 
+
+def ensemble_power_avg_csv(list_csv, power):
+    base_df = pd.read_csv(list_csv[0]).sort_values('id').set_index('id')
+    for i in range(1, len(list_csv)):
+        base_df['toxic'] += pd.read_csv(list_csv[i]).sort_values('id').set_index('id')['toxic'].values**power
+    base_df['toxic'] /= len(list_csv)
+    base_df = base_df.reset_index()
+    base_df[['id', 'toxic']].to_csv('data/power_ensemble_{}.csv'.format(len(list_csv)), index=False)
 
 if __name__ == '__main__':
-    ensemble_simple_avg_csv(['data/submission_train_val_2_avg.csv',
-                             'data/submission_train_val_3_avg.csv',
-                             'data/submission_train_val_4_avg.csv',
-                             'data/submission_train_val_5_avg.csv'])
+    # x = sorted([os.path.join('data/outputs/test/', x) for x in os.listdir('data/outputs/test') if len([y for y in ['_0.csv', '_1.csv', '_2.csv'] if y in x]) == 0])
+    # ensemble_simple_avg_csv(x)
+
+    ensemble_simple_avg_csv(['data/outputs/test/bert-base-italian-xxl-cased_0.csv',
+                             'data/outputs/test/bert-base-italian-xxl-cased_1.csv',
+                             'data/outputs/test/bert-base-italian-xxl-cased_2.csv'])
