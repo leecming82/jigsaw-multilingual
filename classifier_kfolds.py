@@ -51,12 +51,12 @@ class ClassifierHead(torch.nn.Module):
 
     def forward(self, x):
         hidden_states = self.base_model(x)[0]
-        hidden_states = hidden_states.permute(0, 2, 1)
-        cnn_states = self.cnn(hidden_states)
-        cnn_states = cnn_states.permute(0, 2, 1)
-        logits, _ = torch.max(cnn_states, 1)
+        # hidden_states = hidden_states.permute(0, 2, 1)
+        # cnn_states = self.cnn(hidden_states)
+        # cnn_states = cnn_states.permute(0, 2, 1)
+        # logits, _ = torch.max(cnn_states, 1)
 
-        # logits = self.fc(hidden_states[:, -1, :])
+        logits = self.fc(hidden_states[:, 0, :])
         prob = torch.nn.Sigmoid()(logits)
         return prob
 
@@ -73,6 +73,7 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, use_gpu_id, fold_id):
 
     model.train()
     iter = 0
+    running_total_loss = 0
     with trange(0, len(train_indices), BATCH_SIZE,
                 desc='{} - {}'.format(fold_id, curr_epoch),
                 position=use_gpu_id) as t:
@@ -92,6 +93,9 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch, use_gpu_id, fold_id):
                     scaled_loss.backward()
             else:
                 loss.backward()
+
+            running_total_loss += loss.detach().cpu().numpy()
+            t.set_postfix(loss=running_total_loss / iter)
 
             if iter % ACCUM_FOR == 0:
                 opt.step()
