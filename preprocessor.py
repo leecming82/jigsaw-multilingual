@@ -40,6 +40,19 @@ def get_id_text_label_from_csv(csv_path, text_col='comment_text',
                raw_df['toxic'].values, np.full(raw_df.shape[0], add_label)
 
 
+def get_translation_pair_from_csv(csv_path,
+                                  raw_text_col='comment_text',
+                                  en_text_col='comment_text_en',
+                                  sample_frac=1.):
+    raw_df = pd.read_csv(csv_path)
+    if sample_frac < 1:
+        raw_df = raw_df.sample(frac=sample_frac)
+    return (raw_df['id'].values,
+            list(raw_df[raw_text_col].values),
+            list(raw_df[en_text_col].values),
+            raw_df['toxic'].values)
+
+
 def get_balanced_id_text_label_from_csv(csv_path, text_col='comment_text',
                                         sample=None,
                                         add_label=None):
