@@ -20,18 +20,18 @@ from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import save_model
 from swa import SWA
 
-RUN_NAME = 'only9440highconf_975025_2'  # used when writing outputs
+RUN_NAME = '9482xlmr_hard'  # used when writing outputs
 PREDICT = True
-USE_PSEUDO = False  # Add pseudo labels to training dataset
+USE_PSEUDO = True
 USE_SWA = False
 SAVE_MODEL = False
 USE_AMP = True
 PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = 1.  # what % of training data to use
-TRAIN_CSV_PATH = 'data/test9440_025_975.csv'
+TRAIN_SAMPLE_FRAC = 0.05  # what % of training data to use
+TRAIN_CSV_PATH = 'data/translated_2018/combined.csv'
 TEST_CSV_PATH = 'data/test.csv'
-VAL_CSV_PATH = 'data/validation_en.csv'
-PSEUDO_CSV_PATH = 'data/test9440_025_975.csv'
+PSEUDO_CSV_PATH = 'data/submissions/test9482.csv'
+VAL_CSV_PATH = 'data/validation.csv'
 MODEL_SAVE_DIR = 'models/{}'.format(RUN_NAME)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
@@ -45,7 +45,7 @@ SWA_START_STEP = 2000  # counts only optimizer steps - so note if ACCUM_FOR > 1
 SWA_FREQ = 20
 
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 
 class ClassifierHead(torch.nn.Module):
@@ -67,7 +67,7 @@ class ClassifierHead(torch.nn.Module):
         cnn_states = cnn_states.permute(0, 2, 1)
         logits, _ = torch.max(cnn_states, 1)
         # hidden = self.dropout(hidden_states[:, 0, :])
-        # logits = self.fc(hidden)
+        # logits = self.fc(hidden_states[:, -1, :])
         prob = torch.nn.Sigmoid()(logits)
         return prob
 
@@ -153,12 +153,14 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
         amp.register_float_function(torch, 'sigmoid')
         classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
 
+    # classifier = torch.nn.DataParallel(classifier)
+
     list_raw_auc = []
 
     current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
-        # if curr_epoch >= NUM_EPOCHS // 2:
-        #     current_tuple = val_tuple
+        if curr_epoch >= NUM_EPOCHS // 2:
+            current_tuple = val_tuple
         train(classifier, current_tuple, loss_fn, opt, curr_epoch)
 
         epoch_raw_auc = predict_evaluate(classifier, val_tuple, curr_epoch, score=True)
@@ -186,18 +188,31 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
 
 
 if __name__ == '__main__':
+    def cln(x):
+        return ' '.join(x.split())
+
     start_time = time.time()
+    print(RUN_NAME)
 
     # Load train, validation, and pseudo-label data
     train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
-                                                                        text_col='content',
+                                                                        text_col='comment_text',
                                                                         sample_frac=TRAIN_SAMPLE_FRAC)
+    print(train_strings[0])
+    train_strings = [cln(x) for x in train_strings]
+    print(train_strings[0])
 
     val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
-
-    pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH, text_col='content')
+    val_strings = [cln(x) for x in val_strings]
 
     test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='content')
+    test_strings = [cln(x) for x in test_strings]
+
+    pseudo_ids = []
+    if USE_PSEUDO:
+        pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH,
+                                                                               text_col='content')
+        pseudo_strings = [cln(x) for x in pseudo_strings]
 
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
@@ -210,7 +225,6 @@ if __name__ == '__main__':
         train_features = np.array(p.map(encode_partial, train_strings))
         val_features = np.array(p.map(encode_partial, val_strings))
         test_features = np.array(p.map(encode_partial, test_strings))
-        pseudo_features = None
         if USE_PSEUDO:
             pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
 
@@ -218,6 +232,10 @@ if __name__ == '__main__':
         train_features = np.concatenate([train_features, pseudo_features])
         train_labels = np.concatenate([train_labels, pseudo_labels])
         train_ids = np.concatenate([train_ids, pseudo_ids])
+
+    # train_features = np.concatenate([train_features, val_features])
+    # train_labels = np.concatenate([train_labels, val_labels])
+    # train_ids = np.concatenate([train_ids, val_ids])
 
     print('Train size: {}, val size: {}, pseudo size: {}'.format(len(train_ids), len(val_ids), len(pseudo_ids)))
     print('Train positives: {}, train negatives: {}'.format(train_labels[train_labels == 1].shape,
