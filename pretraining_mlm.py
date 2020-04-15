@@ -17,13 +17,17 @@ from tqdm import tqdm
 from apex import amp
 from torch_helpers import mask_tokens
 
-PRETRAINED_MODEL = 'bert-base-multilingual-cased'
-TRAIN_FILE_PATH = 'data/val_test_comments.csv'
+PRETRAINED_MODEL = 'dbmdz/bert-base-italian-xxl-cased'
+TRAIN_FILE_PATH = 'data/it_mlm.csv'
 MODEL_PATH = 'models/bert-mlm-finetuned'
 NUM_EPOCHS = 30
-BATCH_SIZE = 16
-ACCUM_FOR = 2
+BATCH_SIZE = 32
+ACCUM_FOR = 1
 LR = 1e-5
+
+
+def cln(x):
+    return ' '.join(x.split())
 
 
 class TextDataset(Dataset):
@@ -36,7 +40,8 @@ class TextDataset(Dataset):
 
         train_df = pd.read_csv(train_file_path)
         print('# training samples: {}'.format(train_df.shape[0]))
-        combined_comments = ''.join(['[CLS]{}[SEP]'.format(curr_comment) for curr_comment in train_df['comment_text']])
+        raw_comments = [cln(x) for x in train_df['comment_text']]
+        combined_comments = ''.join(['[CLS]{}[SEP]'.format(curr_comment) for curr_comment in raw_comments])
         combined_tokens = tokenizer.encode(combined_comments,
                                            add_special_tokens=False)
         # Truncate in block of block_size
