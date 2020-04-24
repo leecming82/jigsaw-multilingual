@@ -1,11 +1,8 @@
 """
-Baseline PyTorch classifier for Jigsaw Multilingual
-- Assumes two separate train and val sets (i.e., no need for k-folds)
-- Splits epochs between training the train set and the val set (i.e., 0.5 NUM_EPOCHS each)
+Deprecated
 """
 import os
 import time
-from itertools import starmap
 from random import shuffle
 from functools import partial
 import multiprocessing as mp
@@ -18,31 +15,27 @@ from apex import amp
 from tqdm import trange
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import save_model
-from swa import SWA
 
-RUN_NAME = '9482tr_electra'  # used when writing outputs
+RUN_NAME = '9509es'  # used when writing outputs
 PREDICT = True
 USE_PSEUDO = False
-USE_SWA = False
 SAVE_MODEL = False
-USE_AMP = True
-PRETRAINED_MODEL = 'dbmdz/electra-base-turkish-cased-v0-discriminator'
+PRETRAINED_MODEL = 'dccuchile/bert-base-spanish-wwm-cased'
 TRAIN_SAMPLE_FRAC = 1.  # what % of training data to use
-TRAIN_CSV_PATH = 'data/tr_all.csv'
-TEST_CSV_PATH = 'data/tr_test.csv'
+TRAIN_CSV_PATH = 'data/es_all.csv'
+TEST_CSV_PATH = 'data/es_test.csv'
 PSEUDO_CSV_PATH = 'data/submissions/test9452.csv'
-VAL_CSV_PATH = 'data/validation.csv'
+VAL_CSV_PATH = 'data/val_preds.csv'
 MODEL_SAVE_DIR = 'models/{}'.format(RUN_NAME)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
 BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
 NUM_OUTPUTS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 6
-BATCH_SIZE = 32
+VAL_EPOCH = 3  # switch to val dataset at this epoch
+BATCH_SIZE = 64
 ACCUM_FOR = 1
 LR = 1e-5
-SWA_START_STEP = 2000  # counts only optimizer steps - so note if ACCUM_FOR > 1
-SWA_FREQ = 20
 
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 os.environ['CUDA_VISIBLE_DEVICES'] = '1'
@@ -98,11 +91,8 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch):
             loss = loss_fn(preds, batch_labels)
             loss = loss / ACCUM_FOR
 
-            if USE_AMP:
-                with amp.scale_loss(loss, opt) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
+            with amp.scale_loss(loss, opt) as scaled_loss:
+                scaled_loss.backward()
 
             running_total_loss += loss.detach().cpu().numpy()
             t.set_postfix(loss=running_total_loss / iter)
@@ -126,7 +116,7 @@ def predict_evaluate(model, data_tuple, epoch, score=False):
 
     val_preds = np.concatenate(val_preds)
     if score:
-        val_score = roc_auc_score(data_tuple[1], val_preds)
+        val_score = roc_auc_score(np.round(data_tuple[1]), val_preds)
 
     save_folder = 'validation' if score else 'test'
     pd.DataFrame({'id': data_tuple[-1], 'toxic': val_preds}) \
@@ -146,20 +136,14 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
     loss_fn = torch.nn.BCELoss()
     opt = torch.optim.Adam(classifier.parameters(), lr=LR)
 
-    if USE_SWA:
-        opt = SWA(opt, swa_start=SWA_START_STEP, swa_freq=SWA_FREQ)
-
-    if USE_AMP:
-        amp.register_float_function(torch, 'sigmoid')
-        classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
-
-    # classifier = torch.nn.DataParallel(classifier)
+    amp.register_float_function(torch, 'sigmoid')
+    classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
 
     list_raw_auc = []
 
     current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
-        if curr_epoch >= NUM_EPOCHS // 2:
+        if curr_epoch == VAL_EPOCH:
             current_tuple = val_tuple
         train(classifier, current_tuple, loss_fn, opt, curr_epoch)
 
@@ -172,14 +156,6 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
 
         if SAVE_MODEL:
             save_model(os.path.join(MODEL_SAVE_DIR, str(curr_epoch)), classifier, pretrained_config, tokenizer)
-
-    if USE_SWA:
-        opt.swap_swa_sgd()
-        epoch_raw_auc = predict_evaluate(classifier, val_tuple, 'SWA', score=True)
-        print('SWA - Raw: {:.4f}'.format(epoch_raw_auc))
-        list_raw_auc.append(epoch_raw_auc)
-        if SAVE_MODEL:
-            save_model(os.path.join(MODEL_SAVE_DIR, 'SWA'), classifier, pretrained_config, tokenizer)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_raw_auc))
@@ -202,7 +178,7 @@ if __name__ == '__main__':
     train_strings = [cln(x) for x in train_strings]
     print(train_strings[0])
 
-    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text', lang='tr')
+    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text', lang='es')
     val_strings = [cln(x) for x in val_strings]
 
     test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')

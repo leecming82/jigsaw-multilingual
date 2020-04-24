@@ -1,7 +1,5 @@
 """
-Baseline PyTorch classifier for Jigsaw Multilingual
-- Assumes two separate train and val sets (i.e., no need for k-folds)
-- Splits epochs between training the train set and the val set (i.e., 0.5 NUM_EPOCHS each)
+Modification of baseline classifier to apply mixup (at the embedding level)
 """
 import os
 import time
@@ -20,33 +18,27 @@ from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import save_model
 from swa import SWA
 
-RUN_NAME = 'trans_mixup'  # used when writing outputs
+RUN_NAME = '9509es_mixup'  # used when writing outputs
 PREDICT = True
 USE_PSEUDO = False
-USE_SWA = False
-SAVE_MODEL = False
-USE_AMP = True
-PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = .05  # what % of training data to use
-TRAIN_CSV_PATH = 'data/translated_2018/combined.csv'
-TEST_CSV_PATH = 'data/test.csv'
+PRETRAINED_MODEL = 'mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es'
+TRAIN_SAMPLE_FRAC = 1.  # what % of training data to use
+TRAIN_CSV_PATH = 'data/es_all.csv'
+TEST_CSV_PATH = 'data/es_test.csv'
 PSEUDO_CSV_PATH = 'data/submissions/test9452.csv'
 VAL_CSV_PATH = 'data/validation.csv'
-MODEL_SAVE_DIR = 'models/{}'.format(RUN_NAME)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
-BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
+BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
 NUM_OUTPUTS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 6
-BATCH_SIZE = 16
-ACCUM_FOR = 2
+BATCH_SIZE = 64
+ACCUM_FOR = 1
 LR = 1e-5
-SWA_START_STEP = 2000  # counts only optimizer steps - so note if ACCUM_FOR > 1
-SWA_FREQ = 20
 MIXUP_RATE = 1.
 
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 class ClassifierHead(torch.nn.Module):
@@ -63,12 +55,12 @@ class ClassifierHead(torch.nn.Module):
 
     def forward(self, x):
         hidden_states = self.base_model(inputs_embeds=x)[0]
-        hidden_states = hidden_states.permute(0, 2, 1)
-        cnn_states = self.cnn(hidden_states)
-        cnn_states = cnn_states.permute(0, 2, 1)
-        logits, _ = torch.max(cnn_states, 1)
-        # hidden = self.dropout(hidden_states[:, 0, :])
-        # logits = self.fc(hidden)
+        # hidden_states = hidden_states.permute(0, 2, 1)
+        # cnn_states = self.cnn(hidden_states)
+        # cnn_states = cnn_states.permute(0, 2, 1)
+        # logits, _ = torch.max(cnn_states, 1)
+        hidden = hidden_states[:, 0, :]
+        logits = self.fc(hidden)
         prob = torch.nn.Sigmoid()(logits)
         return prob
 
@@ -112,11 +104,8 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch):
             loss = loss_fn(preds, batch_labels)
             loss = loss / ACCUM_FOR
 
-            if USE_AMP:
-                with amp.scale_loss(loss, opt) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
+            with amp.scale_loss(loss, opt) as scaled_loss:
+                scaled_loss.backward()
 
             running_total_loss += loss.detach().cpu().numpy()
             t.set_postfix(loss=running_total_loss / iter)
@@ -161,18 +150,14 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
     loss_fn = torch.nn.BCELoss()
     opt = torch.optim.Adam(classifier.parameters(), lr=LR)
 
-    if USE_SWA:
-        opt = SWA(opt, swa_start=SWA_START_STEP, swa_freq=SWA_FREQ)
-
-    if USE_AMP:
-        amp.register_float_function(torch, 'sigmoid')
-        classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
+    amp.register_float_function(torch, 'sigmoid')
+    classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
 
     list_raw_auc = []
 
     current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
-        if curr_epoch >= NUM_EPOCHS // 2:
+        if curr_epoch == NUM_EPOCHS // 2:
             current_tuple = val_tuple
         train(classifier, current_tuple, loss_fn, opt, curr_epoch)
 
@@ -183,17 +168,6 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
         if PREDICT:
             predict_evaluate(classifier, test_tuple, curr_epoch)
 
-        if SAVE_MODEL:
-            save_model(os.path.join(MODEL_SAVE_DIR, str(curr_epoch)), classifier, pretrained_config, tokenizer)
-
-    if USE_SWA:
-        opt.swap_swa_sgd()
-        epoch_raw_auc = predict_evaluate(classifier, val_tuple, 'SWA', score=True)
-        print('SWA - Raw: {:.4f}'.format(epoch_raw_auc))
-        list_raw_auc.append(epoch_raw_auc)
-        if SAVE_MODEL:
-            save_model(os.path.join(MODEL_SAVE_DIR, 'SWA'), classifier, pretrained_config, tokenizer)
-
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_raw_auc))
 
@@ -201,16 +175,25 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
 
 
 if __name__ == '__main__':
+    def cln(x):
+        return ' '.join(x.split())
+
     start_time = time.time()
+    print(RUN_NAME)
 
     # Load train, validation, and pseudo-label data
     train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
                                                                         text_col='comment_text',
                                                                         sample_frac=TRAIN_SAMPLE_FRAC)
+    print(train_strings[0])
+    train_strings = [cln(x) for x in train_strings]
+    print(train_strings[0])
 
-    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
+    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text', lang='es')
+    val_strings = [cln(x) for x in val_strings]
 
-    test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='content')
+    test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')
+    test_strings = [cln(x) for x in test_strings]
 
     pseudo_ids = []
     if USE_PSEUDO:

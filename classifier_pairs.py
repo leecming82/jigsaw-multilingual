@@ -1,7 +1,6 @@
 """
-Baseline PyTorch classifier for Jigsaw Multilingual
-- Assumes two separate train and val sets (i.e., no need for k-folds)
-- Splits epochs between training the train set and the val set (i.e., 0.5 NUM_EPOCHS each)
+Modification of baseline classifier that
+combines raw and english translations into a single token stream per sample
 """
 import os
 import time

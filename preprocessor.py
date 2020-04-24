@@ -44,6 +44,7 @@ def get_translation_pair_from_csv(csv_path,
                                   raw_text_col='comment_text',
                                   en_text_col='comment_text_en',
                                   sample_frac=1.):
+    """ Returns both raw and translated comments  """
     raw_df = pd.read_csv(csv_path)
     if sample_frac < 1:
         raw_df = raw_df.sample(frac=sample_frac)

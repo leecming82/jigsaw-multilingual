@@ -15,7 +15,7 @@ from apex import amp
 from tqdm import trange
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import EMA, save_model, layerwise_lr_decay
-from classifier_baseline import evaluate, ClassifierHead
+from classifier_baseline import ClassifierHead
 from classifier_baseline import train as pretrain
 
 SAVE_MODEL = True
@@ -191,11 +191,11 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, unsupervised_t
                   curr_epoch,
                   ema)
 
-        epoch_raw_auc = evaluate(classifier, val_raw_tuple)
-        epoch_translated_auc = evaluate(classifier, val_translated_tuple)
-        print('Epoch {} - Raw: {:.4f}, Translated: {:.4f}'.format(curr_epoch, epoch_raw_auc, epoch_translated_auc))
-        list_raw_auc.append(epoch_raw_auc)
-        list_translated_auc.append(epoch_translated_auc)
+        # epoch_raw_auc = evaluate(classifier, val_raw_tuple)
+        # epoch_translated_auc = evaluate(classifier, val_translated_tuple)
+        # print('Epoch {} - Raw: {:.4f}, Translated: {:.4f}'.format(curr_epoch, epoch_raw_auc, epoch_translated_auc))
+        # list_raw_auc.append(epoch_raw_auc)
+        # list_translated_auc.append(epoch_translated_auc)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_raw_auc))
@@ -206,9 +206,9 @@ def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, unsupervised_t
         for name, param in classifier.named_parameters():
             if param.requires_grad:
                 param.data = ema.get(name)
-        epoch_raw_auc = evaluate(classifier, val_raw_tuple)
-        epoch_translated_auc = evaluate(classifier, val_translated_tuple)
-        print('EMA - Raw: {:.4f}, Translated: {:.4f}'.format(epoch_raw_auc, epoch_translated_auc))
+        # epoch_raw_auc = evaluate(classifier, val_raw_tuple)
+        # epoch_translated_auc = evaluate(classifier, val_translated_tuple)
+        # print('EMA - Raw: {:.4f}, Translated: {:.4f}'.format(epoch_raw_auc, epoch_translated_auc))
         save_model(os.path.join(OUTPUT_DIR, '{}_ema'.format(PRETRAINED_MODEL)), classifier, pretrained_config,
                    tokenizer)
 

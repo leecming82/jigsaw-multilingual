@@ -7,7 +7,7 @@ RUN rm /etc/bash.bashrc
 WORKDIR /root
 
 RUN pip install scikit-learn pandas matplotlib torch torchvision pathos fairseq tensorflow_text tensorflow_hub
-RUN pip install git+https://github.com/huggingface/transformers.git@master#egg=transformers
+#RUN pip install git+https://github.com/huggingface/transformers.git@master#egg=transformers
 RUN apt-get update && apt-get install -y openssh-server screen
 RUN mkdir /var/run/sshd
 RUN echo 'root:testdocker' | chpasswd
@@ -23,6 +23,11 @@ RUN pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="-
 
 RUN git clone https://github.com/facebookresearch/fastText.git
 WORKDIR /root/fastText
+RUN pip install .
+
+WORKDIR /root
+RUN git clone https://github.com/huggingface/transformers
+WORKDIR /root/transformers
 RUN pip install .
 
 ENV NOTVISIBLE "in users profile"
