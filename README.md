@@ -3,7 +3,7 @@ A suite of primarily PyTorch modules targeting the [2020 Jigsaw Multilingual Kag
 Local validation is performed against the validation dataset. 
 
 Alternative approaches (and modifications) to the baseline classifier include:
-(note that the baseline classifier approach has so far outperformed other approaches so far)
+(note that these modules aren't as tested as the baseline classifier and may require debugging)
 
 | Model | Comment |
 | ----- | ------  |
