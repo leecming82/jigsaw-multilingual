@@ -29,6 +29,7 @@ def ensemble_simple_avg_csv(list_csv):
 def ensemble_power_avg_csv(list_csv, power):
     """ Power averaging of input CSV toxicity """
     base_df = pd.read_csv(list_csv[0]).sort_values('id').set_index('id')
+    base_df['toxic'] = base_df['toxic'] ** power
     for i in range(1, len(list_csv)):
         base_df['toxic'] += pd.read_csv(list_csv[i]).sort_values('id').set_index('id')['toxic'].values**power
     base_df['toxic'] /= len(list_csv)
