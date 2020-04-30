@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
+from scipy.stats import rankdata
 
 
 def score_roc_auc(target_csv, predicted_csv):
@@ -31,10 +32,22 @@ def ensemble_power_avg_csv(list_csv, power):
     base_df = pd.read_csv(list_csv[0]).sort_values('id').set_index('id')
     base_df['toxic'] = base_df['toxic'] ** power
     for i in range(1, len(list_csv)):
-        base_df['toxic'] += pd.read_csv(list_csv[i]).sort_values('id').set_index('id')['toxic'].values**power
+        base_df['toxic'] += pd.read_csv(list_csv[i]).sort_values('id').set_index('id')['toxic'].values ** power
     base_df['toxic'] /= len(list_csv)
     base_df = base_df.reset_index()
     base_df[['id', 'toxic']].to_csv('data/power_ensemble_{}.csv'.format(len(list_csv)), index=False)
+
+
+def ensemble_rank_avg_csv(list_csv):
+    """ Rank averaging given list of CSVs """
+    predict_list = [pd.read_csv(curr_csv).sort_values('id').set_index('id') for curr_csv in list_csv]
+    predictions = np.zeros_like(predict_list[0]['toxic'])
+    for predict in predict_list:
+        curr_preds = rankdata(predict['toxic'].values) / predictions.shape[0]
+        predictions = np.add(predictions, curr_preds)
+    predictions /= len(predict_list)
+    predict_list[0]['toxic'] = predictions
+    predict_list[0].reset_index().to_csv('data/rank_ensemble_{}.csv'.format(len(list_csv)), index=False)
 
 
 if __name__ == '__main__':
