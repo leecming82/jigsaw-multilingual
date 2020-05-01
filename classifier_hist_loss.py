@@ -3,51 +3,41 @@ Converts single prob point estimate to bins - histogram loss
 """
 import os
 import time
-from itertools import starmap
 from random import shuffle
 from functools import partial
 import multiprocessing as mp
+import pandas as pd
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
-from preprocessor import get_id_text_label_from_csv, generate_target_dist
-from torch_helpers import EMA, save_model, layerwise_lr_decay
+from preprocessor import get_id_text_label_from_csv, generate_target_dist, get_id_text_from_test_csv
 
-SAVE_MODEL = False
+RUN_NAME = '9536it_xxl_uncased_hist'  # added as prefix to file outputs
+PREDICT = True
+USE_VAL_LANG = 'it'
 USE_AMP = True
-USE_EMA = False
-USE_PSEUDO = False  # Add pseudo labels to training dataset
-USE_MULTI_GPU = False
-USE_LR_DECAY = False
-PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = .1  # what % of training data to use
-TRAIN_CSV_PATH = 'data/toxic_2018/pl_en.csv'
-VAL_CSV_PATH = 'data/validation_en.csv'
-PSEUDO_CSV_PATH = 'data/test9426.csv'
-OUTPUT_DIR = 'models/train_val_hist'
-NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
+PRETRAINED_MODEL = 'dbmdz/bert-base-italian-xxl-uncased'
+TRAIN_SAMPLE_FRAC = 1.  # what % of training data to use
+TRAIN_CSV_PATH = 'data/it_all.csv'
+TEST_CSV_PATH = 'data/it_test.csv'
+VAL_CSV_PATH = 'data/val_preds.csv'
 MAX_CORES = 24  # limit MP calls to use this # cores at most
-BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
-INTERMEDIATE_HIDDEN_UNITS = 10
+BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
+NUM_OUTPUTS = 10
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 2  # Half trained using train, half on val (+ PL)
-BATCH_SIZE = 24
-ACCUM_FOR = 2
-SAVE_ITER = 100  # save every X iterations
-EMA_DECAY = 0.999
-LR_DECAY_FACTOR = 0.75
-LR_DECAY_START = 1e-3
-LR_FINETUNE = 1e-5
+NUM_EPOCHS = 6  # Half trained using train, half on val (+ PL)
+BATCH_SIZE = 64
+ACCUM_FOR = 1
+LR = 1e-5
 LOW = -0.2
 HIGH = 1.2
 NUM_BINS = 10
 
-if not USE_MULTI_GPU:
-    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 
 class ClassifierHead(torch.nn.Module):
@@ -55,31 +45,20 @@ class ClassifierHead(torch.nn.Module):
     Bert base with a Linear layer plopped on top of it
     - connects the max pool of the last hidden layer with the FC
     """
-
     def __init__(self, base_model):
         super(ClassifierHead, self).__init__()
         self.base_model = base_model
-        self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS, kernel_size=1)
-        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, INTERMEDIATE_HIDDEN_UNITS)
+        self.cnn = torch.nn.Conv1d(BASE_MODEL_OUTPUT_DIM, NUM_OUTPUTS, kernel_size=1)
+        self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, NUM_OUTPUTS)
 
-    def forward(self, x, freeze=True):
-        if freeze:
-            with torch.no_grad():
-                hidden_states = self.base_model(x)[0]
-        else:
-            hidden_states = self.base_model(x)[0]
-
-        hidden_states = hidden_states.permute(0, 2, 1)
-        cnn_states = self.cnn(hidden_states)
-        cnn_states = cnn_states.permute(0, 2, 1)
-        logits, _ = torch.max(cnn_states, 1)
-
-        # logits = self.fc(hidden_states[:, 0, :])
+    def forward(self, x):
+        hidden_states = self.base_model(x)[0]
+        logits = self.fc(hidden_states[:, 0, :])
         prob = torch.nn.Softmax(dim=-1)(logits)
         return prob
 
 
-def train(model, config, train_tuple, loss_fn, opt, curr_epoch, ema):
+def train(model, train_tuple, loss_fn, opt, curr_epoch):
     """ Train """
     # Shuffle train indices for current epoch, batching
     all_features, all_labels, _ = train_tuple
@@ -101,10 +80,7 @@ def train(model, config, train_tuple, loss_fn, opt, curr_epoch, ema):
             batch_features = torch.tensor(train_features[batch_idx_start:batch_idx_end]).cuda()
             batch_labels = torch.tensor(train_labels[batch_idx_start:batch_idx_end]).float().cuda()
 
-            if curr_epoch < 1:
-                preds = model(batch_features, freeze=True)
-            else:
-                preds = model(batch_features, freeze=False)
+            preds = model(batch_features)
             loss = loss_fn(preds, batch_labels)
             loss = loss / ACCUM_FOR
 
@@ -121,132 +97,94 @@ def train(model, config, train_tuple, loss_fn, opt, curr_epoch, ema):
                 opt.step()
                 opt.zero_grad()
 
-            if USE_EMA:
-                # Update EMA shadow parameters on every back pass
-                for name, param in model.named_parameters():
-                    if param.requires_grad:
-                        ema.update(name, param.data)
 
-            # Save every specified step on last epoch
-            if curr_epoch == NUM_EPOCHS - 1 and iter % SAVE_ITER == 0 and SAVE_MODEL:
-                print('Saving epoch {} model'.format(curr_epoch))
-                save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, '{}_{}'.format(curr_epoch, iter)),
-                           model,
-                           config,
-                           tokenizer)
-
-
-def evaluate(model, val_tuple, supports):
-    # Evaluate validation AUC
-    val_features, _, val_ids = val_tuple
-
-    model.eval()
+def predict_evaluate(model, data_tuple, supports, epoch, score=False):
+    """
+    Make predictions against either val or test set
+    Saves output to csv in data/outputs/test or data/outputs/validation
+    """
+    val_score = None
     val_preds = []
+    model.eval()
     with torch.no_grad():
-        for batch_idx_start in range(0, len(val_ids), BATCH_SIZE):
-            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(val_ids))
-            batch_features = torch.tensor(val_features[batch_idx_start:batch_idx_end]).cuda()
+        for batch_idx_start in range(0, len(data_tuple[-1]), BATCH_SIZE):
+            batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(data_tuple[-1]))
+            batch_features = torch.tensor(data_tuple[0][batch_idx_start:batch_idx_end]).cuda()
             batch_preds = model(batch_features)
             batch_preds = np.dot(batch_preds.cpu(), supports)
             val_preds.append(batch_preds)
 
-        val_preds = np.concatenate(val_preds)
-        val_roc_auc_score = roc_auc_score(val_labels, val_preds)
-    return val_roc_auc_score
+    val_preds = np.concatenate(val_preds)
+    if score:
+        val_score = roc_auc_score(np.round(data_tuple[2]), val_preds)
+
+    save_folder = 'validation' if score else 'test'
+    pd.DataFrame({'id': data_tuple[-1], 'toxic': val_preds}) \
+        .to_csv('data/outputs/{}/{}_{}.csv'.format(save_folder,
+                                                   RUN_NAME,
+                                                   epoch),
+                index=False)
+
+    return val_score
 
 
-def main_driver(train_tuple, val_raw_tuple, val_translated_tuple, pseudo_tuple, supports, tokenizer):
+def main_driver(train_tuple, val_tuple, test_tuple, supports, tokenizer):
     pretrained_config = AutoConfig.from_pretrained(PRETRAINED_MODEL,
                                                    output_hidden_states=True)
     pretrained_base = AutoModel.from_pretrained(PRETRAINED_MODEL, config=pretrained_config).cuda()
     classifier = ClassifierHead(pretrained_base).cuda()
-
-    if USE_EMA:
-        ema = EMA(EMA_DECAY)
-        for name, param in classifier.named_parameters():
-            if param.requires_grad:
-                ema.register(name, param.data)
-    else:
-        ema = None
-
     loss_fn = torch.nn.BCELoss()
-    if USE_LR_DECAY:
-        parameters_update = layerwise_lr_decay(classifier, LR_DECAY_START, LR_DECAY_FACTOR)
-        opt = torch.optim.Adam(parameters_update)
-    else:
-        opt = torch.optim.Adam(classifier.parameters(), lr=LR_DECAY_START)
+    opt = torch.optim.Adam(classifier.parameters(), lr=LR)
 
     if USE_AMP:
         amp.register_float_function(torch, 'sigmoid')
         classifier, opt = amp.initialize(classifier, opt, opt_level='O1', verbosity=0)
 
-    if USE_MULTI_GPU:
-        classifier = torch.nn.DataParallel(classifier)
-
-    list_raw_auc, list_translated_auc = [], []
+    list_auc = []
 
     current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
-        # switch to finetune - only lower for those > finetune LR
-        # i.e., lower layers might have even smaller LR
-        if curr_epoch == 1:
-            print('Switching to fine-tune LR')
-            for g in opt.param_groups:
-                g['lr'] = LR_FINETUNE
-
         # Switch from toxic-2018 to the current mixed language dataset, halfway thru
         if curr_epoch == NUM_EPOCHS // 2:
-            print('Switching to training on validation set')
-            print('Saving base English trained model')
-            save_model(os.path.join(OUTPUT_DIR, PRETRAINED_MODEL, 'base_en'),
-                       classifier, pretrained_config, tokenizer)
-            if USE_PSEUDO:
-                current_tuple = pseudo_tuple
-            else:
-                current_tuple = val_raw_tuple
+            current_tuple = [val_tuple[0], val_tuple[1], val_tuple[3]]
+        train(classifier, current_tuple, loss_fn, opt, curr_epoch)
 
-        train(classifier, pretrained_config, current_tuple, loss_fn, opt, curr_epoch, ema)
+        epoch_raw_auc = predict_evaluate(classifier, val_tuple, supports, curr_epoch, score=True)
+        print('Epoch {} - Raw: {:.4f}'.format(curr_epoch, epoch_raw_auc))
+        list_auc.append(epoch_raw_auc)
 
-        epoch_raw_auc = evaluate(classifier, val_raw_tuple, supports)
-        epoch_translated_auc = evaluate(classifier, val_translated_tuple, supports)
-        print('Epoch {} - Raw: {:.4f}, Translated: {:.4f}'.format(curr_epoch, epoch_raw_auc, epoch_translated_auc))
-        list_raw_auc.append(epoch_raw_auc)
-        list_translated_auc.append(epoch_translated_auc)
+        if PREDICT:
+            predict_evaluate(classifier, test_tuple, supports, curr_epoch)
 
     with np.printoptions(precision=4, suppress=True):
-        print(np.array(list_raw_auc))
-        print(np.array(list_translated_auc))
-
-    if USE_EMA and SAVE_MODEL:
-        # Load EMA parameters and evaluate once again
-        for name, param in classifier.named_parameters():
-            if param.requires_grad:
-                param.data = ema.get(name)
-        epoch_raw_auc = evaluate(classifier, val_raw_tuple)
-        epoch_translated_auc = evaluate(classifier, val_translated_tuple)
-        print('EMA - Raw: {:.4f}, Translated: {:.4f}'.format(epoch_raw_auc, epoch_translated_auc))
-        save_model(os.path.join(OUTPUT_DIR, '{}_ema'.format(PRETRAINED_MODEL)), classifier, pretrained_config,
-                   tokenizer)
+        print(np.array(list_auc))
 
 
 if __name__ == '__main__':
+    def cln(x):  # Truncates adjacent whitespaces to single whitespace
+        return ' '.join(x.split())
+
     start_time = time.time()
+    print(RUN_NAME)
 
     # Load train, validation, and pseudo-label data
     train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
                                                                         text_col='comment_text',
                                                                         sample_frac=TRAIN_SAMPLE_FRAC)
+    print(train_strings[0])
+    train_strings = [cln(x) for x in train_strings]
+    print(train_strings[0])
 
-    val_ids, val_raw_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
-    _, val_translated_strings, _ = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text_en')
+    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH,
+                                                                  text_col='comment_text',
+                                                                  lang=USE_VAL_LANG)
+    val_strings = [cln(x) for x in val_strings]
 
-    pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH, text_col='content')
+    test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')
+    test_strings = [cln(x) for x in test_strings]
 
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
-    if 'gpt' in PRETRAINED_MODEL:  # GPT2 pre-trained tokenizer doesn't set a padding token
-        tokenizer.add_special_tokens({'pad_token': '<|endoftext|>'})
-
     encode_partial = partial(tokenizer.encode,
                              max_length=MAX_SEQ_LEN,
                              pad_to_max_length=True,
@@ -254,32 +192,23 @@ if __name__ == '__main__':
     print('Encoding raw strings into model-specific tokens')
     with mp.Pool(MAX_CORES) as p:
         train_features = np.array(p.map(encode_partial, train_strings))
-        val_raw_features = np.array(p.map(encode_partial, val_raw_strings))
-        val_translated_features = np.array(p.map(encode_partial, val_translated_strings))
-        pseudo_features = None
-        if USE_PSEUDO:
-            pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
+        val_features = np.array(p.map(encode_partial, val_strings))
+        test_features = np.array(p.map(encode_partial, test_strings))
 
     generate_target_partial = partial(generate_target_dist, num_bins=NUM_BINS, low=LOW, high=HIGH)
     with mp.Pool(MAX_CORES) as p:
         train_hist_labels = np.stack([x[1] for x in p.map(generate_target_partial, train_labels)])
         val_hist_labels = np.stack([x[1] for x in p.map(generate_target_partial, val_labels)])
-        pseudo_hist_labels = np.stack([x[1] for x in p.map(generate_target_partial, pseudo_labels)])
     supports = generate_target_partial(-1)[0]
     print(train_labels.shape)
 
-    if USE_PSEUDO:  # so that when we switch, can just use this tuple imeddiately
-        pseudo_features = np.concatenate([val_raw_features, pseudo_features])
-        pseudo_hist_labels = np.concatenate([val_hist_labels, pseudo_hist_labels])
-        pseudo_labels = np.concatenate([val_labels, pseudo_labels])
-        pseudo_ids = np.concatenate([val_ids, pseudo_ids])
-
-    print('Train size: {}, val size: {}, pseudo size: {}'.format(len(train_ids), len(val_ids), len(pseudo_ids)))
+    print('Train size: {}, val size: {}, test size: {}'.format(len(train_ids), len(val_ids), len(test_ids)))
+    print('Train positives: {}, train negatives: {}'.format(train_labels[train_labels == 1].shape,
+                                                            train_labels[train_labels == 0].shape))
 
     main_driver([train_features, train_hist_labels, train_ids],
-                [val_raw_features,  val_hist_labels, val_labels],
-                [val_translated_features, val_hist_labels, val_labels],
-                [pseudo_features, pseudo_hist_labels, pseudo_ids],
+                [val_features, val_hist_labels, val_labels, val_ids],
+                [test_features, test_ids],
                 supports,
                 tokenizer)
 
