@@ -4,6 +4,7 @@ Classifier using BiGRU w/ pretrained FastText embeddings
 import time
 from itertools import starmap
 import multiprocessing as mp
+import pandas as pd
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.optimizers import Adam
@@ -15,9 +16,10 @@ from sklearn.metrics import roc_auc_score
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from fasttext import load_model
 
-TRAIN_CSV_PATH = 'data/it_all.csv'
+RUN_NAME = '9537es_ft'
+TRAIN_CSV_PATH = 'data/es_all.csv'
 TRAIN_SAMPLE_FRAC = 1.
-TEST_CSV_PATH = 'data/it_test.csv'
+TEST_CSV_PATH = 'data/es_test.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
 NUM_OUTPUTS = 1  # Number of targets
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
@@ -58,7 +60,7 @@ def generate_embedding_matrix(fitted_tokenizer):
     :param fitted_tokenizer:
     :return:
     """
-    ft_model = load_model('models/cc.it.300.bin')
+    ft_model = load_model('models/cc.es.300.bin')
 
     embedding_matrix = np.zeros((VOCAB_SIZE + 1, EMBEDDING_DIMS))
     for i in range(1, VOCAB_SIZE + 1):
@@ -91,16 +93,18 @@ def build_classifier_model(embedding_matrix):
 
 def train_driver(train_tuple,
                  val_tuple,
+                 test_tuple,
                  embedding_matrix):
     train_features, train_labels = train_tuple
     val_features, val_labels = val_tuple
+    test_features, test_ids = test_tuple
 
     classifier = build_classifier_model(embedding_matrix)
     opt = Adam()
     opt = tf.keras.mixed_precision.experimental.LossScaleOptimizer(opt, 'dynamic')
     classifier.compile(optimizer=opt, loss='binary_crossentropy')
 
-    for _ in range(NUM_EPOCHS):
+    for curr_epoch in range(NUM_EPOCHS):
         classifier.fit(train_features, train_labels,
                        batch_size=BATCH_SIZE,
                        epochs=1,
@@ -108,6 +112,12 @@ def train_driver(train_tuple,
         val_preds = classifier.predict(val_features)
         val_roc_auc_score = roc_auc_score(val_labels, val_preds)
         print(val_roc_auc_score)
+
+        test_preds = classifier.predict(test_features).squeeze()
+        pd.DataFrame({'id': test_ids, 'toxic': test_preds}) \
+            .to_csv('data/outputs/test/{}_{}.csv'.format(RUN_NAME,
+                                                         curr_epoch),
+                    index=False)
 
 
 if __name__ == '__main__':
@@ -118,7 +128,7 @@ if __name__ == '__main__':
                                                                         sample_frac=TRAIN_SAMPLE_FRAC)
     val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH,
                                                                   text_col='comment_text',
-                                                                  lang='it')
+                                                                  lang='es')
     test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')
 
     (tokenizer, train_features, val_features, test_features)\
@@ -130,6 +140,7 @@ if __name__ == '__main__':
 
     train_driver([train_features, train_labels],
                  [val_features, val_labels],
+                 [test_features, test_ids],
                  pretrained_embedding_matrix)
 
     print('Elapsed time: {}'.format(time.time() - start_time))
