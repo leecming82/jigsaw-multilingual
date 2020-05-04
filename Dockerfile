@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/tensorflow:19.12-tf2-py3
+FROM nvcr.io/nvidia/tensorflow:20.03-tf2-py3
 ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
 
@@ -6,7 +6,8 @@ RUN rm /etc/bash.bashrc
 
 WORKDIR /root
 
-RUN pip install scikit-learn pandas matplotlib torch torchvision pathos fairseq tensorflow_text tensorflow_hub
+RUN pip install scikit-learn pandas matplotlib torch torchvision pathos fairseq
+#tensorflow_text tensorflow_hub
 #RUN pip install git+https://github.com/huggingface/transformers.git@master#egg=transformers
 RUN apt-get update && apt-get install -y openssh-server screen
 RUN mkdir /var/run/sshd
