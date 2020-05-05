@@ -1,5 +1,7 @@
 """
 Base Torch classifier with MLM as aux loss
+- BERT derivatives [CLS] [SEP]
+- Camembert <s> </s>
 """
 import os
 import time
@@ -17,9 +19,9 @@ from tqdm import tqdm
 from apex import amp
 from torch_helpers import mask_tokens
 
-PRETRAINED_MODEL = 'dbmdz/bert-base-italian-xxl-cased'
-TRAIN_FILE_PATH = 'data/it_mlm.csv'
-MODEL_PATH = 'models/bert-mlm-finetuned'
+PRETRAINED_MODEL = 'camembert-base'
+TRAIN_FILE_PATH = 'data/fr_mlm.csv'
+MODEL_PATH = 'models/fr_mlm'
 NUM_EPOCHS = 30
 BATCH_SIZE = 32
 ACCUM_FOR = 1
@@ -41,7 +43,7 @@ class TextDataset(Dataset):
         train_df = pd.read_csv(train_file_path)
         print('# training samples: {}'.format(train_df.shape[0]))
         raw_comments = [cln(x) for x in train_df['comment_text']]
-        combined_comments = ''.join(['[CLS]{}[SEP]'.format(curr_comment) for curr_comment in raw_comments])
+        combined_comments = ''.join(['<s>{}</s>'.format(curr_comment) for curr_comment in raw_comments])
         combined_tokens = tokenizer.encode(combined_comments,
                                            add_special_tokens=False)
         # Truncate in block of block_size
