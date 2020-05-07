@@ -31,6 +31,11 @@ RUN git clone https://github.com/huggingface/transformers
 WORKDIR /root/transformers
 RUN pip install .
 
+WORKDIR /root
+RUN git clone https://github.com/HIT-SCIR/ELMoForManyLangs.git
+WORKDIR /root/ELMoForManyLangs
+RUN python setup.py install
+
 ENV NOTVISIBLE "in users profile"
 RUN echo "export VISIBLE=now" >> /etc/profile
 
