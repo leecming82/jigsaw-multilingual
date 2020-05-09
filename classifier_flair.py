@@ -1,6 +1,7 @@
 """
 Torch classifier:
 - Flair embeddings combined with Bidirectional LSTM
+- NOT WORKING - USE CLASSIFIER_FLAIR_TF
 """
 import os
 import time
@@ -10,8 +11,7 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from flair.data import Sentence
-from flair.embeddings import FlairEmbeddings
-from flair.embeddings import StackedEmbeddings
+from flair.embeddings import FlairEmbeddings, StackedEmbeddings, WordEmbeddings
 from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
@@ -27,8 +27,10 @@ TRAIN_CSV_PATH = 'data/es_all.csv'
 TEST_CSV_PATH = 'data/es_test.csv'
 PSEUDO_CSV_PATH = 'data/submissions/test9529.csv'
 VAL_CSV_PATH = 'data/validation.csv'
-FLAIR_EMBEDDING_DIM = 4096
-FLAIR_MODEL_LIST = ['multi-forward', 'multi-backward']
+FLAIR_EMBEDDING_DIM = 1024
+# FLAIR_MODEL_LIST = [FlairEmbeddings('multi-v0-forward'), FlairEmbeddings('multi-v0-backward')]
+FLAIR_MODEL_LIST = [FlairEmbeddings('multi-v0-forward-fast'),
+                    FlairEmbeddings('multi-v0-backward-fast')]
 RNN_LAYERS = 2
 RNN_HIDDEN = 128
 NUM_OUTPUTS = 1  # Num of output units (should be 1 for Toxicity)
@@ -65,12 +67,10 @@ class BiRNN(torch.nn.Module):
         return out
 
 
-def train(model, train_tuple, loss_fn, opt, curr_epoch):
+def train(stacked_embeddings, model, train_tuple, loss_fn, opt, curr_epoch):
     """
     Trains against the train_tuple features for a single epoch
     """
-    stacked_embeddings = StackedEmbeddings(embeddings=[FlairEmbeddings(x) for x in FLAIR_MODEL_LIST])
-
     # Shuffle train indices for current epoch, batching
     all_features, all_labels, all_ids = train_tuple
     train_indices = list(range(len(all_labels)))
@@ -88,7 +88,7 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch):
             iter += 1
             batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(train_indices))
 
-            batch_sentences = [Sentence(x) for x in train_features[batch_idx_start:batch_idx_end]]
+            batch_sentences = [Sentence(x, use_tokenizer=True) for x in train_features[batch_idx_start:batch_idx_end]]
             stacked_embeddings.embed(batch_sentences)
             batch_features = [torch.stack([curr_token.embedding for curr_token in curr_sentence]) for curr_sentence
                               in batch_sentences]
@@ -111,7 +111,7 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch):
                 opt.zero_grad()
 
 
-def predict_evaluate(model, data_tuple, epoch, score=False):
+def predict_evaluate(stacked_embeddings, model, data_tuple, epoch, score=False):
     """
     Make predictions against either val or test set
     Saves output to csv in data/outputs/test or data/outputs/validation
@@ -122,7 +122,11 @@ def predict_evaluate(model, data_tuple, epoch, score=False):
     with torch.no_grad():
         for batch_idx_start in range(0, len(data_tuple[-1]), BATCH_SIZE):
             batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(data_tuple[-1]))
-            batch_features = torch.tensor(data_tuple[0][batch_idx_start:batch_idx_end]).cuda()
+            batch_sentences = [Sentence(x, use_tokenizer=True) for x in data_tuple[0][batch_idx_start:batch_idx_end]]
+            stacked_embeddings.embed(batch_sentences)
+            batch_features = [torch.stack([curr_token.embedding for curr_token in curr_sentence]) for curr_sentence
+                              in batch_sentences]
+            batch_features = pad_sequence(batch_features, batch_first=True)[:, :MAX_SEQ_LEN, :]
             batch_preds = model(batch_features)
             val_preds.append(batch_preds.cpu().numpy().squeeze())
 
@@ -141,6 +145,7 @@ def predict_evaluate(model, data_tuple, epoch, score=False):
 
 
 def main_driver(train_tuple, val_tuple, test_tuple):
+    stacked_embeddings = StackedEmbeddings(embeddings=FLAIR_MODEL_LIST)
     classifier = BiRNN(FLAIR_EMBEDDING_DIM, RNN_HIDDEN, RNN_LAYERS, NUM_OUTPUTS).cuda()
     loss_fn = torch.nn.BCELoss()
 
@@ -155,14 +160,14 @@ def main_driver(train_tuple, val_tuple, test_tuple):
         # After half epochs, switch to training against validation set
         # if curr_epoch == NUM_EPOCHS // 2:
         #     current_tuple = val_tuple
-        train(classifier, current_tuple, loss_fn, opt, curr_epoch)
+        train(stacked_embeddings, classifier, current_tuple, loss_fn, opt, curr_epoch)
 
-        epoch_raw_auc = predict_evaluate(classifier, val_tuple, curr_epoch, score=True)
+        epoch_raw_auc = predict_evaluate(stacked_embeddings, classifier, val_tuple, curr_epoch, score=True)
         print('Epoch {} - Raw: {:.4f}'.format(curr_epoch, epoch_raw_auc))
         list_auc.append(epoch_raw_auc)
 
         if PREDICT:
-            predict_evaluate(classifier, test_tuple, curr_epoch)
+            predict_evaluate(stacked_embeddings, classifier, test_tuple, curr_epoch)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_auc))
