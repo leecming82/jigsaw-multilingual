@@ -22,12 +22,12 @@ from sklearn.metrics import roc_auc_score
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from elmoformanylangs import Embedder
 
-RUN_NAME = '9544pt_elmo'
-USE_LANG = 'pt'
-ELMO_MODEL_PATH = 'models/elmo-pt'
-TRAIN_CSV_PATH = 'data/pt_all.csv'
+RUN_NAME = '9544fr_elmo'
+USE_LANG = 'fr'
+ELMO_MODEL_PATH = 'models/elmo-fr'
+TRAIN_CSV_PATH = 'data/fr_all.csv'
 TRAIN_SAMPLE_FRAC = 1.
-TEST_CSV_PATH = 'data/pt_test.csv'
+TEST_CSV_PATH = 'data/fr_test.csv'
 VAL_CSV_PATH = 'data/validation_en.csv'
 NUM_OUTPUTS = 1  # Number of targets
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
@@ -36,6 +36,10 @@ BATCH_SIZE = 64
 NUM_CORES = 12
 EMBEDDING_DIMS = 1024
 HIDDEN_UNITS = 128
+
+gpus = tf.config.experimental.list_physical_devices('GPU')
+for gpu in gpus:
+    tf.config.experimental.set_memory_growth(gpu, True)
 
 
 def tokenize(text):
