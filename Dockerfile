@@ -6,7 +6,7 @@ RUN rm /etc/bash.bashrc
 
 WORKDIR /root
 
-RUN pip install scikit-learn pandas matplotlib torch torchvision pathos fairseq flair bpemb allennlp
+RUN pip install scikit-learn pandas matplotlib torch torchvision pathos fairseq flair bpemb allennlp laserembeddings
 RUN apt-get update && apt-get install -y openssh-server screen
 RUN mkdir /var/run/sshd
 RUN echo 'root:testdocker' | chpasswd
@@ -33,6 +33,8 @@ WORKDIR /root
 RUN git clone https://github.com/HIT-SCIR/ELMoForManyLangs.git
 WORKDIR /root/ELMoForManyLangs
 RUN python setup.py install
+
+RUN python -m laserembeddings download-models
 
 ENV NOTVISIBLE "in users profile"
 RUN echo "export VISIBLE=now" >> /etc/profile
