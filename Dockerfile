@@ -6,7 +6,7 @@ RUN rm /etc/bash.bashrc
 
 WORKDIR /root
 
-RUN pip install scikit-learn pandas matplotlib torch torchvision pathos fairseq flair bpemb
+RUN pip install scikit-learn pandas matplotlib torch torchvision pathos fairseq flair bpemb allennlp
 RUN apt-get update && apt-get install -y openssh-server screen
 RUN mkdir /var/run/sshd
 RUN echo 'root:testdocker' | chpasswd
