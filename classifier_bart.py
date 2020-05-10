@@ -1,7 +1,6 @@
 """
-Baseline PyTorch classifier for Jigsaw Multilingual
-- Assumes two separate train and val sets (i.e., no need for k-folds)
-- Splits epochs between training the train set and the val set (i.e., 0.5 NUM_EPOCHS each)
+mBart classifier using the Fairseq implementation -
+pretty buggy; recommend using classifier_baseline.py and the Transformer implementation
 """
 import os
 import time
