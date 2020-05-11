@@ -3,6 +3,7 @@ import pandas as pd
 from functools import lru_cache
 from sklearn.model_selection import KFold
 from scipy.stats import truncnorm
+from random import random
 
 SEED = 1337
 NUM_FOLDS = 4
@@ -113,6 +114,58 @@ def generate_target_dist(mean, num_bins, low, high):
     supports = np.array([x * (2 * radius) + radius + low for x in range(num_bins)])
     probs = np.array([trunc_norm_prob(support) for support in supports])
     return supports, probs
+
+
+def tokenize(self, text):
+    """
+    Modified version of tokenize in transformers tokenization_bert.py
+    - Monkeypatch by replacing a tokenizer instance's Wordpiece Tokenizer's tokenize function
+    - to monkey patch:
+        <tokenizer instance>.wordpiece_tokenizer.tokenize =
+                tokenize.__get__(<instance>.wordpiece_tokenizer, WordpieceTokenizer)
+    - implements BPE encode by failing substring to vocab matches with prob 0.1
+    """
+    def whitespace_tokenize(text):
+        """Runs basic whitespace cleaning and splitting on a piece of text."""
+        text = text.strip()
+        if not text:
+            return []
+        tokens = text.split()
+        return tokens
+
+    output_tokens = []
+    for token in whitespace_tokenize(text):
+        chars = list(token)
+        if len(chars) > self.max_input_chars_per_word:
+            output_tokens.append(self.unk_token)
+            continue
+
+        is_bad = False
+        start = 0
+        sub_tokens = []
+        while start < len(chars):
+            end = len(chars)
+            cur_substr = None
+            while start < end:
+                substr = "".join(chars[start:end])
+                if start > 0:
+                    substr = "##" + substr
+                # Fail vocab lookup with prob 0.1
+                if substr in self.vocab and random() > 0.1:
+                    cur_substr = substr
+                    break
+                end -= 1
+            if cur_substr is None:
+                is_bad = True
+                break
+            sub_tokens.append(cur_substr)
+            start = end
+
+        if is_bad:
+            output_tokens.append(self.unk_token)
+        else:
+            output_tokens.extend(sub_tokens)
+    return output_tokens
 
 
 if __name__ == '__main__':
