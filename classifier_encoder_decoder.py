@@ -8,22 +8,22 @@ import multiprocessing as mp
 import pandas as pd
 import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModel, AutoConfig, EncoderDecoderModel
+from transformers import AutoTokenizer, AutoModel, AutoConfig, EncoderDecoderModel, AutoModelWithLMHead
 from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import save_model
 
-RUN_NAME = '9536it'  # added as prefix to file outputs
+RUN_NAME = '9545es_encoderdecoder'  # added as prefix to file outputs
 PREDICT = True  # Make predictions against TEST_CSV_PATH test features
 SAVE_MODEL = False  # Saves model at end of every epoch to MODEL_SAVE_DIR
-USE_VAL_LANG = 'it'  # if set to ISO lang str (e.g., "es") - only pulls that language's validation samples
-PRETRAINED_MODEL_1 = 'idb-ita/gilberto-uncased-from-camembert'
-PRETRAINED_MODEL_2 = 'dbmdz/bert-base-italian-xxl-cased'
+USE_VAL_LANG = 'es'  # if set to ISO lang str (e.g., "es") - only pulls that language's validation samples
+PRETRAINED_MODEL_1 = 'dccuchile/bert-base-spanish-wwm-uncased'
+PRETRAINED_MODEL_2 = 'mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es'
 TRAIN_SAMPLE_FRAC = 1.  # what proportion of training data (from TRAIN_CSV_PATH) to sample
-TRAIN_CSV_PATH = 'data/it_all.csv'
-TEST_CSV_PATH = 'data/it_test.csv'
+TRAIN_CSV_PATH = 'data/es_all.csv'
+TEST_CSV_PATH = 'data/es_test.csv'
 VAL_CSV_PATH = 'data/validation.csv'
 MODEL_SAVE_DIR = 'models/{}'.format(RUN_NAME)
 MAX_CORES = 24  # limit MP calls to use this # cores at most; for tokenizing
@@ -32,13 +32,13 @@ NUM_OUTPUTS = 1  # Num of output units (should be 1 for Toxicity)
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 6
 # Gradient Accumulation: updates every ACCUM_FOR steps so that effective BS = BATCH_SIZE * ACCUM_FOR
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 ACCUM_FOR = 1
 LR = 1e-5  # Learning rate - constant value
 
 # For multi-gpu environments - make only 1 GPU visible to process
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 class ClassifierHead(torch.nn.Module):
@@ -132,10 +132,17 @@ def predict_evaluate(model, data_tuple, epoch, score=False):
 
 
 def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
-    pretrained_config = AutoConfig.from_pretrained(PRETRAINED_MODEL_1,
-                                                   output_hidden_states=True)
-    pretrained_base = EncoderDecoderModel.from_encoder_decoder_pretrained(PRETRAINED_MODEL_1,
-                                                                          PRETRAINED_MODEL_2).cuda()
+    # need to create encoder/decoder models and pass to EncoderDecoderModel
+    # there's a bug where if you just pass model strings to from_pretrained to EncoderDecoderModel,
+    # it doesn't set the decoder to decoder mode
+    encoder_config = AutoConfig.from_pretrained(PRETRAINED_MODEL_1)
+    encoder_model = AutoModel.from_pretrained(PRETRAINED_MODEL_1, config=encoder_config)
+
+    decoder_config = AutoConfig.from_pretrained(PRETRAINED_MODEL_2, is_decoder=True)
+    decoder_model = AutoModelWithLMHead.from_pretrained(PRETRAINED_MODEL_2, config=decoder_config)
+
+    pretrained_base = EncoderDecoderModel(encoder=encoder_model, decoder=decoder_model)
+
     classifier = ClassifierHead(pretrained_base).cuda()
     loss_fn = torch.nn.BCELoss()
     opt = torch.optim.Adam(classifier.parameters(), lr=LR)
@@ -157,9 +164,6 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
 
         if PREDICT:
             predict_evaluate(classifier, test_tuple, curr_epoch)
-
-        if SAVE_MODEL:
-            save_model(os.path.join(MODEL_SAVE_DIR, str(curr_epoch)), classifier, pretrained_config, tokenizer)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_auc))
