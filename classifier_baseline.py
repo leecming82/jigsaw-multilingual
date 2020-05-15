@@ -24,31 +24,31 @@ from tqdm import trange
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import save_model
 
-RUN_NAME = '9510xlmr_mixeddistilledval'  # added as prefix to file outputs
+RUN_NAME = '9545tr'  # added as prefix to file outputs
 PREDICT = True  # Make predictions against TEST_CSV_PATH test features
-USE_PSEUDO = True  # Use pseudo-labels in PSEUDO_CSV_PATH
+USE_PSEUDO = False  # Use pseudo-labels in PSEUDO_CSV_PATH
 SAVE_MODEL = False  # Saves model at end of every epoch to MODEL_SAVE_DIR
-USE_VAL_LANG = None  # if set to ISO lang str (e.g., "es") - only pulls that language's validation samples
-PRETRAINED_MODEL = 'xlm-roberta-large'
-TRAIN_SAMPLE_FRAC = 0.075  # what proportion of training data (from TRAIN_CSV_PATH) to sample
-TRAIN_CSV_PATH = 'data/translated_2018/combined_distilled.csv'
-TEST_CSV_PATH = 'data/test.csv'
+USE_VAL_LANG = 'tr'  # if set to ISO lang str (e.g., "es") - only pulls that language's validation samples
+PRETRAINED_MODEL = 'dbmdz/bert-base-turkish-128k-uncased'
+TRAIN_SAMPLE_FRAC = 1  # what proportion of training data (from TRAIN_CSV_PATH) to sample
+TRAIN_CSV_PATH = 'data/tr_all.csv'
+TEST_CSV_PATH = 'data/tr_test.csv'
 PSEUDO_CSV_PATH = 'data/submissions/test9510.csv'
-VAL_CSV_PATH = 'data/val_preds.csv'
+VAL_CSV_PATH = 'data/validation.csv'
 MODEL_SAVE_DIR = 'models/{}'.format(RUN_NAME)
 MAX_CORES = 24  # limit MP calls to use this # cores at most; for tokenizing
-BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
+BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
 NUM_OUTPUTS = 1  # Num of output units (should be 1 for Toxicity)
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 6
 # Gradient Accumulation: updates every ACCUM_FOR steps so that effective BS = BATCH_SIZE * ACCUM_FOR
-BATCH_SIZE = 16
-ACCUM_FOR = 2
+BATCH_SIZE = 64
+ACCUM_FOR = 1
 LR = 1e-5  # Learning rate - constant value
 
 # For multi-gpu environments - make only 1 GPU visible to process
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 class ClassifierHead(torch.nn.Module):
@@ -64,11 +64,11 @@ class ClassifierHead(torch.nn.Module):
 
     def forward(self, x):
         hidden_states = self.base_model(x)[0]
-        hidden_states = hidden_states.permute(0, 2, 1)
-        cnn_states = self.cnn(hidden_states)
-        cnn_states = cnn_states.permute(0, 2, 1)
-        logits, _ = torch.max(cnn_states, 1)
-        # logits = self.fc(hidden_states[:, 0, :])
+        # hidden_states = hidden_states.permute(0, 2, 1)
+        # cnn_states = self.cnn(hidden_states)
+        # cnn_states = cnn_states.permute(0, 2, 1)
+        # logits, _ = torch.max(cnn_states, 1)
+        logits = self.fc(hidden_states[:, 0, :])
         prob = torch.nn.Sigmoid()(logits)
         return prob
 
@@ -196,7 +196,7 @@ if __name__ == '__main__':
                                                                   lang=USE_VAL_LANG)
     val_strings = [cln(x) for x in val_strings]
 
-    test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='content')
+    test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')
     test_strings = [cln(x) for x in test_strings]
 
     pseudo_ids = []
