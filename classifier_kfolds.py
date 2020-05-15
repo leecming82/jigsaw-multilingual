@@ -20,20 +20,21 @@ from preprocessor import (generate_train_kfolds_indices,
                           get_id_text_label_from_csv,
                           get_id_text_from_test_csv)
 
-RUN_NAME = 'cv_all9940'
+RUN_NAME = 'es_all9945'
 USE_AMP = True
 # PATH TUPLE - (PATH, SAMPLE_FRAC, (0-train, 1-train-val, 2-pred), TEXT-col)
-TRAIN_CSV_PATHS = [['data/submissions/test9440.csv', 1., 2, 'content'],
-                   ['data/validation.csv', 1., 1, 'comment_text']]
-PRETRAINED_MODEL = 'xlm-roberta-large'
+TRAIN_CSV_PATHS = [['data/es_all.csv', 1., 0, 'comment_text'],
+                   ['data/es_test.csv', 1., 2, 'comment_text'],
+                   ['data/es_val.csv', 1., 1, 'comment_text']]
+PRETRAINED_MODEL = 'mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es'
 NUM_GPUS = 2  # Set to 1 if using AMP (doesn't seem to play nice with 1080 Ti)
 MAX_CORES = 24  # limit MP calls to use this # cores at most
-BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
+BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
 NUM_OUTPUTS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
-NUM_EPOCHS = 6
-BATCH_SIZE = 16
-ACCUM_FOR = 2
+NUM_EPOCHS = 4
+BATCH_SIZE = 64
+ACCUM_FOR = 1
 LR = 1e-5
 
 
