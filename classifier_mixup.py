@@ -18,24 +18,24 @@ from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from torch_helpers import save_model
 from swa import SWA
 
-RUN_NAME = '9509es_mixup'  # used when writing outputs
+RUN_NAME = '9545all_mixup'  # used when writing outputs
 PREDICT = True
 USE_PSEUDO = False
-PRETRAINED_MODEL = 'mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es'
+PRETRAINED_MODEL = 'xlm-roberta-large'
 TRAIN_SAMPLE_FRAC = 1.  # what % of training data to use
-TRAIN_CSV_PATH = 'data/es_all.csv'
-TEST_CSV_PATH = 'data/es_test.csv'
+TRAIN_CSV_PATH = 'data/all_all.csv'
+TEST_CSV_PATH = 'data/all_test.csv'
 PSEUDO_CSV_PATH = 'data/submissions/test9452.csv'
 VAL_CSV_PATH = 'data/validation.csv'
 MAX_CORES = 24  # limit MP calls to use this # cores at most
-BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
+BASE_MODEL_OUTPUT_DIM = 1024  # hidden layer dimensions
 NUM_OUTPUTS = 1
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 6
-BATCH_SIZE = 64
-ACCUM_FOR = 1
+BATCH_SIZE = 12
+ACCUM_FOR = 3
 LR = 1e-5
-MIXUP_RATE = 1.
+MIXUP_RATE = 2.
 
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -54,15 +54,16 @@ class ClassifierHead(torch.nn.Module):
         self.fc = torch.nn.Linear(BASE_MODEL_OUTPUT_DIM, NUM_OUTPUTS)
 
     def forward(self, x):
-        hidden_states = self.base_model(inputs_embeds=x)[0]
+        hidden_states = self.base_model(x)[0]
         # hidden_states = hidden_states.permute(0, 2, 1)
         # cnn_states = self.cnn(hidden_states)
         # cnn_states = cnn_states.permute(0, 2, 1)
         # logits, _ = torch.max(cnn_states, 1)
         hidden = hidden_states[:, 0, :]
-        logits = self.fc(hidden)
-        prob = torch.nn.Sigmoid()(logits)
-        return prob
+        # logits = self.fc(hidden)
+        # prob = torch.nn.Sigmoid()(logits)
+        # return prob
+        return hidden
 
 
 def train(model, train_tuple, loss_fn, opt, curr_epoch):
@@ -88,19 +89,18 @@ def train(model, train_tuple, loss_fn, opt, curr_epoch):
             batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(train_indices))
 
             batch_features_left = torch.tensor(train_features_left[batch_idx_start:batch_idx_end]).cuda()
-            embed_left = model.base_model.embeddings(batch_features_left)
+            hidden_left = model(batch_features_left)
 
             batch_features_right = torch.tensor(train_features_right[batch_idx_start:batch_idx_end]).cuda()
-            embed_right = model.base_model.embeddings(batch_features_right)
+            hidden_right = model(batch_features_right)
 
             p = np.random.beta(MIXUP_RATE, MIXUP_RATE, size=(1, 1))
             combined_labels = p * train_labels_left[batch_idx_start:batch_idx_end] + \
                               (1 - p) * train_labels_right[batch_idx_start:batch_idx_end]
-            p = torch.tensor(p).reshape(1, 1, 1).float().cuda()
-            combined_embed = p * embed_left + (1 - p) * embed_right
+            p = torch.tensor(p).reshape(1, 1).float().cuda()
             batch_labels = torch.tensor(combined_labels).float().cuda().permute(1, 0)
-
-            preds = model(combined_embed)
+            combined_hidden = p * hidden_left + (1 - p) * hidden_right
+            preds = torch.nn.Sigmoid()(model.fc(combined_hidden))
             loss = loss_fn(preds, batch_labels)
             loss = loss / ACCUM_FOR
 
@@ -124,8 +124,7 @@ def predict_evaluate(model, data_tuple, epoch, score=False):
         for batch_idx_start in range(0, len(data_tuple[-1]), BATCH_SIZE):
             batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(data_tuple[-1]))
             batch_features = torch.tensor(data_tuple[0][batch_idx_start:batch_idx_end]).cuda()
-            embed = model.base_model.embeddings(batch_features)
-            batch_preds = model(embed)
+            batch_preds = torch.nn.Sigmoid()(model.fc(model(batch_features)))
             val_preds.append(batch_preds.cpu().numpy().squeeze())
 
     val_preds = np.concatenate(val_preds)
@@ -189,7 +188,7 @@ if __name__ == '__main__':
     train_strings = [cln(x) for x in train_strings]
     print(train_strings[0])
 
-    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text', lang='es')
+    val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH, text_col='comment_text')
     val_strings = [cln(x) for x in val_strings]
 
     test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')
