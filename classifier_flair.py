@@ -1,7 +1,6 @@
 """
 Torch classifier:
-- Flair embeddings combined with Bidirectional LSTM
-- NOT WORKING - USE CLASSIFIER_FLAIR_TF
+- Flair embeddings combined with Bidirectional GRU
 """
 import os
 import time
@@ -11,7 +10,7 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from flair.data import Sentence
-from flair.embeddings import FlairEmbeddings, StackedEmbeddings, WordEmbeddings
+from flair.embeddings import FlairEmbeddings, StackedEmbeddings, WordEmbeddings, FastTextEmbeddings
 from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
@@ -27,10 +26,10 @@ TRAIN_CSV_PATH = 'data/es_all.csv'
 TEST_CSV_PATH = 'data/es_test.csv'
 PSEUDO_CSV_PATH = 'data/submissions/test9529.csv'
 VAL_CSV_PATH = 'data/validation.csv'
-FLAIR_EMBEDDING_DIM = 1024
-# FLAIR_MODEL_LIST = [FlairEmbeddings('multi-v0-forward'), FlairEmbeddings('multi-v0-backward')]
-FLAIR_MODEL_LIST = [FlairEmbeddings('multi-v0-forward-fast'),
-                    FlairEmbeddings('multi-v0-backward-fast')]
+FLAIR_EMBEDDING_DIM = 300
+FLAIR_MODEL_LIST = [FastTextEmbeddings('models/cc.es.300.bin')]
+# FLAIR_MODEL_LIST = [FlairEmbeddings('multi-v0-forward-fast'),
+#                     FlairEmbeddings('multi-v0-backward-fast')]
 RNN_LAYERS = 2
 RNN_HIDDEN = 128
 NUM_OUTPUTS = 1  # Num of output units (should be 1 for Toxicity)
@@ -51,16 +50,11 @@ class BiRNN(torch.nn.Module):
         super(BiRNN, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.lstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.gru = torch.nn.GRU(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
         self.fc = torch.nn.Linear(hidden_size * 2, num_classes)  # 2 for bidirection
 
     def forward(self, x):
-        # Set initial states
-        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).cuda()
-        c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).cuda()
-
-        # Forward propagate LSTM
-        out, _ = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
+        out, _ = self.gru(x)  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
 
         # Decode the hidden state of the last time step
         out = torch.nn.Sigmoid()(self.fc(out[:, -1, :]))
