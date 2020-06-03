@@ -125,7 +125,7 @@ def predict_evaluate(model, data_tuple, epoch, score=False):
             batch_idx_end = min(batch_idx_start + BATCH_SIZE, len(data_tuple[-1]))
             batch_features = torch.tensor(data_tuple[0][batch_idx_start:batch_idx_end]).cuda()
             batch_preds = model(batch_features)
-            val_preds.append(batch_preds.cpu().numpy().squeeze())
+            val_preds.append(batch_preds.cpu().numpy().reshape(-1))
 
     val_preds = np.concatenate(val_preds)
     if score:
