@@ -1,6 +1,8 @@
 ### Introduction
 PyTorch model code used by the 1st place winner for the  [2020 Jigsaw Multilingual Kaggle competition](https://www.kaggle.com/c/jigsaw-multilingual-toxic-comment-classification). 
-Our solution is detailed in this [Kaggle forum post](https://www.kaggle.com/c/jigsaw-multilingual-toxic-comment-classification/discussion/160862).
+Our solution is detailed in this [Kaggle forum post](https://www.kaggle.com/c/jigsaw-multilingual-toxic-comment-classification/discussion/160862). 
+
+Note that our solution entails iteratively training models, making predictions, using blends of those predictions to train other models, and repeating. Consequently, there is no "closed-form" single model training run to generate our winning solution. Instead, we show below 2 examples of running a monolingual Transformer model and a monolingual FastText model using 2 different LB-scoring pseudo-labels.  
 
 
 
@@ -46,6 +48,19 @@ A submission file should be generated at $TRAIN_DATA_DIR/curr_run_submission.csv
 
 A submission file should be generated at $TRAIN_DATA_DIR/curr_run_submission.csv. For this, we were able to generate a 9540 public LB submission. Due to training variability, you may get different results.
 
+
 ### Notes
 1. The code and container environment were run on a fairly heavy-weight workstation (24C/48T Threadripper + 64GB RAM + 2x RTX Titans w/ 24GB GPU RAM each) and using mixed precision training + gradient accumulation. It may not be feasible to finetune larger models such as XLM-Roberta-Large on smaller-scale machines especially with entry-level Nvidia cards.
 You can adjust the BATCH_SIZE and ACCUM_FOR flags in classifier_baseline.py to fit in memory but it may impact model performance. 
+
+2. Below lists the various pretrained HuggingFace transformer models we used -
+
+| Language | Models |
+| -------- | ------ | 
+| All | xlm-roberta-large |
+| French | camembert-base, camembert/camembert-large, flaubert/flaubert_large_cased |
+| Italian | dbmdz/bert-base-italian-xxl-cased, dbmdz/bert-base-italian-xxl-uncased, m-polignano-uniba/bert_uncased_L-12_H-768_A-12_italian_alb3rt0 |
+| Portuguese | neuralmind/bert-large-portuguese-cased | 
+| Russian | DeepPavlov/rubert-base-cased-conversational |
+| Spanish | dccuchile/bert-base-spanish-wwm-cased, dccuchile/bert-base-spanish-wwm-uncased, mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es |
+| Turkish | dbmdz/bert-base-turkish-128k-cased, dbmdz/bert-base-turkish-128k-uncased, dbmdz/electra-base-turkish-cased-v0-discriminator |
