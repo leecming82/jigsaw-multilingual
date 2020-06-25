@@ -24,9 +24,17 @@ Note that our solution entails iteratively training models, making predictions, 
 3. Translations of the Toxic 2018 dataset and pseudo-labels for public LB 9500 and public LB 9537 (used as sample inputs to training) can be found [here](https://www.kaggle.com/leecming/multilingual-toxic-comments-training-data).
 
 ### Setup
-1. A [DockerFile](Dockerfile) is provided which builds against an Nvidia-provided Docker image, and installs the necessary Nvidia, system, and Python prerequisites - IMPORTANT: the Dockerfile installs an SSH server with a default password
-2. Various functions ingest and generate files - it is suggested that you mount them within container volumes to allow for smooth movement of files in & out of the container
-3. With an SSH server and Jupyter notebook server within the container - it is suggested that you bind ports to enable external connections
+1. A [DockerFile](Dockerfile) is provided which builds against an Nvidia-provided Docker image, and installs the necessary Nvidia, system, and Python prerequisites - IMPORTANT: the Dockerfile installs an SSH server in-container with a default password (root/testdocker). 
+2. Sample Docker build and run invocation: docker build -t jigsaw-multi .
+&& docker run
+-p 8888:22 -p 8889:8888
+-v /home/leecming/PycharmProjects/jigsaw-multilingual/data:/root/data
+-v /home/leecming/PycharmProjects/jigsaw-multilingual/models:/root/models
+-v /home/leecming/PycharmProjects/jigsaw-multilingual/notebooks:/root/notebooks
+--name jigsaw-multi
+jigsaw-multi 
+3. Various functions ingest and generate files - it is suggested that you mount them within container volumes to allow for smooth movement of files in & out of the container
+4. With an SSH server and Jupyter notebook server within the container - it is suggested that you bind ports to enable external connections
 
 ### Example 1: Running a spanish monolingual Transformer model using public LB 9500 pseudo-labels 
 1. We use the pretrained spanish model mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es
