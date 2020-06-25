@@ -1,7 +1,9 @@
 """
-Classifier using BiGRU w/ pretrained FastText embeddings
+Monolingual classifier using Bidirectional GRU w/ pretrained FastText embeddings
 """
 import time
+import json
+import os
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -14,19 +16,20 @@ from sklearn.metrics import roc_auc_score
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
 from fasttext import load_model
 
-RUN_NAME = '9544tr_ft'
-USE_LANG = 'tr'
-TRAIN_CSV_PATH = 'data/tr_all.csv'
-TRAIN_SAMPLE_FRAC = 1.
-TEST_CSV_PATH = 'data/tr_test.csv'
-VAL_CSV_PATH = 'data/validation_en.csv'
+with open('SETTINGS.json') as f:
+    SETTINGS_DICT = json.load(f)
+
+USE_LANG = 'es'  # select the right FastText language model file
+TRAIN_CSV_PATH = os.path.join(SETTINGS_DICT['TRAIN_DATA_DIR'], 'curr_run_train.csv')
+TEST_CSV_PATH = os.path.join(SETTINGS_DICT['TRAIN_DATA_DIR'], 'curr_run_test.csv')
+VAL_CSV_PATH = os.path.join(SETTINGS_DICT['TRAIN_DATA_DIR'], 'curr_run_val.csv')
 NUM_OUTPUTS = 1  # Number of targets
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
 NUM_EPOCHS = 4
 BATCH_SIZE = 32
-VOCAB_SIZE = 100000
-EMBEDDING_DIMS = 300
-HIDDEN_UNITS = 128
+VOCAB_SIZE = 100000  # Used to generate the embeddings matrix
+EMBEDDING_DIMS = 300  # Dimensions of the FastText embedder (typically 300)
+HIDDEN_UNITS = 128  # Hidden units for the Bidirectional GRU
 
 
 def texts_to_padded_sequences(train_strings, val_strings, test_strings):
@@ -59,7 +62,8 @@ def generate_embedding_matrix(fitted_tokenizer):
     :param fitted_tokenizer:
     :return:
     """
-    ft_model = load_model('models/cc.{}.300.bin'.format(USE_LANG))
+    ft_model = load_model(os.path.join(SETTINGS_DICT['FT_MODELS_DIR'],
+                                       'cc.{}.300.bin'.format(USE_LANG)))
 
     embedding_matrix = np.zeros((VOCAB_SIZE + 1, EMBEDDING_DIMS))
     for i in range(1, VOCAB_SIZE + 1):
@@ -115,9 +119,10 @@ def train_driver(train_tuple,
             print(val_roc_auc_score)
 
         test_preds = classifier.predict(test_features).squeeze()
+        curr_test_path = os.path.join(SETTINGS_DICT['PREDICTION_DIR'],
+                                      '{}.csv'.format(curr_epoch))
         pd.DataFrame({'id': test_ids, 'toxic': test_preds}) \
-            .to_csv('data/outputs/test/{}_{}.csv'.format(RUN_NAME,
-                                                         curr_epoch),
+            .to_csv(curr_test_path,
                     index=False)
 
 
@@ -125,14 +130,13 @@ if __name__ == '__main__':
     start_time = time.time()
     # Load train, validation, and pseudo-label data
     train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
-                                                                        text_col='comment_text',
-                                                                        sample_frac=TRAIN_SAMPLE_FRAC)
+                                                                        text_col='comment_text')
     val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH,
                                                                   text_col='comment_text',
                                                                   lang=USE_LANG)
     test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')
 
-    (tokenizer, train_features, val_features, test_features)\
+    (tokenizer, train_features, val_features, test_features) \
         = texts_to_padded_sequences(train_strings, val_strings, test_strings)
 
     print(train_features.shape, val_features.shape, test_features.shape)

@@ -18,13 +18,13 @@ def score_roc_auc(target_csv, predicted_csv):
                          compare_df['toxic'].values)
 
 
-def ensemble_simple_avg_csv(list_csv):
+def ensemble_simple_avg_csv(list_csv, output_path='data/preds.csv'):
     """ Given a list of CSVs with id/toxic columns, outputs a single CSV with averaged toxicity """
     base_df = pd.read_csv(list_csv[0]).sort_values('id').set_index('id')
     for i in range(1, len(list_csv)):
         base_df['toxic'] += pd.read_csv(list_csv[i]).sort_values('id').set_index('id')['toxic']
     base_df['toxic'] /= len(list_csv)
-    base_df.reset_index().to_csv('data/es_preds.csv', index=False)
+    base_df.reset_index().to_csv(output_path, index=False)
 
 
 def ensemble_power_avg_csv(list_csv, power):
@@ -52,7 +52,7 @@ def ensemble_rank_avg_csv(list_csv):
 
 if __name__ == '__main__':
     x = sorted([os.path.join('data/outputs/test', x) for x in os.listdir('data/outputs/test')])
-    x = [y for y in x if '9509es' in y]
+    # x = [y for y in x if '9509es' in y]
     print(len(x))
     print(x)
     ensemble_simple_avg_csv(x)

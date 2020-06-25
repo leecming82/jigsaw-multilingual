@@ -1,14 +1,14 @@
 """
-Baseline PyTorch classifier
+Baseline PyTorch classifier using a pretrained HuggingFace Transformer model
+- Run prepare_data.py prior to generate the prerequisite training files
+- Classifier head on-top of the 1st token of the last hidden layer from the base pretrained model
 - Uses APEX mixed precision (FP16) training
 - Allows for gradient accumulation with the ACCUM_FOR flag
-- checkpoint ensembling by predicting the test-set every epoch
-- predicts the validation set for scoring
-- saves both test and val set predictions to CSVs in data/outputs/test & data/outputs/validations
-  (ensure those directories are present)
+- checkpoint ensembling by predicting the test-set every epoch (saves to $PREDICTION_DIR/{EPOCH_NUM}.csv)
 - Given NUM_EPOCHS, trains against the train dataset for half the epochs, and the val dataset for remaining half
 - for preprocessing comments, truncates adjacent whitespaces to a single whitespace
 """
+import json
 import os
 import time
 from random import shuffle
@@ -22,24 +22,20 @@ from sklearn.metrics import roc_auc_score
 from apex import amp
 from tqdm import trange
 from preprocessor import get_id_text_label_from_csv, get_id_text_from_test_csv
-from torch_helpers import save_model
 
-RUN_NAME = '9545tr'  # added as prefix to file outputs
-PREDICT = True  # Make predictions against TEST_CSV_PATH test features
-USE_PSEUDO = False  # Use pseudo-labels in PSEUDO_CSV_PATH
-SAVE_MODEL = False  # Saves model at end of every epoch to MODEL_SAVE_DIR
-USE_VAL_LANG = 'tr'  # if set to ISO lang str (e.g., "es") - only pulls that language's validation samples
-PRETRAINED_MODEL = 'dbmdz/bert-base-turkish-128k-uncased'
-TRAIN_SAMPLE_FRAC = 1  # what proportion of training data (from TRAIN_CSV_PATH) to sample
-TRAIN_CSV_PATH = 'data/tr_all.csv'
-TEST_CSV_PATH = 'data/tr_test.csv'
-PSEUDO_CSV_PATH = 'data/submissions/test9510.csv'
-VAL_CSV_PATH = 'data/validation.csv'
-MODEL_SAVE_DIR = 'models/{}'.format(RUN_NAME)
+with open('SETTINGS.json') as f:
+    SETTINGS_DICT = json.load(f)
+
+PRETRAINED_MODEL = 'mrm8488/distill-bert-base-spanish-wwm-cased-finetuned-spa-squad2-es'
+TRAIN_CSV_PATH = os.path.join(SETTINGS_DICT['TRAIN_DATA_DIR'], 'curr_run_train.csv')
+TEST_CSV_PATH = os.path.join(SETTINGS_DICT['TRAIN_DATA_DIR'], 'curr_run_test.csv')
+VAL_CSV_PATH = os.path.join(SETTINGS_DICT['TRAIN_DATA_DIR'], 'curr_run_val.csv')
 MAX_CORES = 24  # limit MP calls to use this # cores at most; for tokenizing
 BASE_MODEL_OUTPUT_DIM = 768  # hidden layer dimensions
 NUM_OUTPUTS = 1  # Num of output units (should be 1 for Toxicity)
 MAX_SEQ_LEN = 200  # max sequence length for input strings: gets padded/truncated
+# Num. epochs to train against (if validation data exists, the model will switch to training against the validation
+# data in the 2nd half of epochs
 NUM_EPOCHS = 6
 # Gradient Accumulation: updates every ACCUM_FOR steps so that effective BS = BATCH_SIZE * ACCUM_FOR
 BATCH_SIZE = 64
@@ -54,8 +50,9 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 class ClassifierHead(torch.nn.Module):
     """
     Bert base with a Linear layer plopped on top of it
-    - connects the max pool of the last hidden layer with the FC
+    - connects the CLS token of the last hidden layer with the FC
     """
+
     def __init__(self, base_model):
         super(ClassifierHead, self).__init__()
         self.base_model = base_model
@@ -64,10 +61,14 @@ class ClassifierHead(torch.nn.Module):
 
     def forward(self, x):
         hidden_states = self.base_model(x)[0]
+
+        # If you want to max-pool on a CNN of all tokens of the last hidden layer
         # hidden_states = hidden_states.permute(0, 2, 1)
         # cnn_states = self.cnn(hidden_states)
         # cnn_states = cnn_states.permute(0, 2, 1)
         # logits, _ = torch.max(cnn_states, 1)
+
+        # FC on 1st token (typically CLS special token)
         logits = self.fc(hidden_states[:, 0, :])
         prob = torch.nn.Sigmoid()(logits)
         return prob
@@ -129,14 +130,14 @@ def predict_evaluate(model, data_tuple, epoch, score=False):
 
     val_preds = np.concatenate(val_preds)
     if score:
+        # predict validation samples
         val_score = roc_auc_score(np.round(data_tuple[1]), val_preds)
-
-    save_folder = 'validation' if score else 'test'
-    pd.DataFrame({'id': data_tuple[-1], 'toxic': val_preds}) \
-        .to_csv('data/outputs/{}/{}_{}.csv'.format(save_folder,
-                                                   RUN_NAME,
-                                                   epoch),
-                index=False)
+    else:
+        # predicting test samples
+        curr_test_path = os.path.join(SETTINGS_DICT['PREDICTION_DIR'],
+                                      '{}.csv'.format(epoch))
+        pd.DataFrame({'id': data_tuple[-1], 'toxic': val_preds}) \
+            .to_csv(curr_test_path, index=False)
 
     return val_score
 
@@ -156,58 +157,45 @@ def main_driver(train_tuple, val_tuple, test_tuple, tokenizer):
     current_tuple = train_tuple
     for curr_epoch in range(NUM_EPOCHS):
         # After half epochs, switch to training against validation set
-        if curr_epoch == NUM_EPOCHS // 2:
+        if curr_epoch == NUM_EPOCHS // 2 and len(val_tuple[-1]) > 0:
             current_tuple = val_tuple
         train(classifier, current_tuple, loss_fn, opt, curr_epoch)
 
-        epoch_raw_auc = predict_evaluate(classifier, val_tuple, curr_epoch, score=True)
-        print('Epoch {} - Raw: {:.4f}'.format(curr_epoch, epoch_raw_auc))
-        list_auc.append(epoch_raw_auc)
+        # Score against the validation set
+        if len(val_tuple[-1]) > 0:
+            epoch_raw_auc = predict_evaluate(classifier, val_tuple, curr_epoch, score=True)
+            print('Epoch {} - Val AUC: {:.4f}'.format(curr_epoch, epoch_raw_auc))
+            list_auc.append(epoch_raw_auc)
 
-        if PREDICT:
-            predict_evaluate(classifier, test_tuple, curr_epoch)
-
-        if SAVE_MODEL:
-            save_model(os.path.join(MODEL_SAVE_DIR, str(curr_epoch)), classifier, pretrained_config, tokenizer)
+        predict_evaluate(classifier, test_tuple, curr_epoch)
 
     with np.printoptions(precision=4, suppress=True):
         print(np.array(list_auc))
-
-    pd.DataFrame({'val_auc': list_auc}).to_csv('data/outputs/results/{}.csv'.format(RUN_NAME), index=False)
 
 
 if __name__ == '__main__':
     def cln(x):  # Truncates adjacent whitespaces to single whitespace
         return ' '.join(x.split())
 
+
     start_time = time.time()
-    print(RUN_NAME)
 
     # Load train, validation, and pseudo-label data
     train_ids, train_strings, train_labels = get_id_text_label_from_csv(TRAIN_CSV_PATH,
-                                                                        text_col='comment_text',
-                                                                        sample_frac=TRAIN_SAMPLE_FRAC)
-    print(train_strings[0])
+                                                                        text_col='comment_text')
     train_strings = [cln(x) for x in train_strings]
-    print(train_strings[0])
 
     val_ids, val_strings, val_labels = get_id_text_label_from_csv(VAL_CSV_PATH,
-                                                                  text_col='comment_text',
-                                                                  lang=USE_VAL_LANG)
+                                                                  text_col='comment_text')
     val_strings = [cln(x) for x in val_strings]
 
     test_ids, test_strings = get_id_text_from_test_csv(TEST_CSV_PATH, text_col='comment_text')
     test_strings = [cln(x) for x in test_strings]
 
-    pseudo_ids = []
-    if USE_PSEUDO:
-        pseudo_ids, pseudo_strings, pseudo_labels = get_id_text_label_from_csv(PSEUDO_CSV_PATH,
-                                                                               text_col='content')
-        pseudo_strings = [cln(x) for x in pseudo_strings]
-
     # use MP to batch encode the raw feature strings into Bert token IDs
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
     encode_partial = partial(tokenizer.encode,
+                             truncation=True,
                              max_length=MAX_SEQ_LEN,
                              pad_to_max_length=True,
                              add_special_tokens=True)
@@ -216,19 +204,8 @@ if __name__ == '__main__':
         train_features = np.array(p.map(encode_partial, train_strings))
         val_features = np.array(p.map(encode_partial, val_strings))
         test_features = np.array(p.map(encode_partial, test_strings))
-        if USE_PSEUDO:
-            pseudo_features = np.array(p.map(encode_partial, pseudo_strings))
 
-    if USE_PSEUDO:
-        train_features = np.concatenate([train_features, pseudo_features])
-        train_labels = np.concatenate([train_labels, pseudo_labels])
-        train_ids = np.concatenate([train_ids, pseudo_ids])
-
-    # train_features = np.concatenate([train_features, val_features])
-    # train_labels = np.concatenate([train_labels, val_labels])
-    # train_ids = np.concatenate([train_ids, val_ids])
-
-    print('Train size: {}, val size: {}, pseudo size: {}'.format(len(train_ids), len(val_ids), len(pseudo_ids)))
+    print('Train size: {}, val size: {}'.format(len(train_ids), len(val_ids)))
     print('Train positives: {}, train negatives: {}'.format(train_labels[train_labels == 1].shape,
                                                             train_labels[train_labels == 0].shape))
 

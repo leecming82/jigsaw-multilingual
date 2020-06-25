@@ -1,0 +1,8 @@
+{
+  "TRAIN_2018_PATH": "data/translated_2018/combined_distilled.csv",
+  "PSEUDO_LABELS_PATH": "data/submissions/test9500.csv",
+  "VALIDATION_PATH": "data/validation.csv",
+  "TRAIN_DATA_DIR": "data/",
+  "PREDICTION_DIR": "data/outputs/test/",
+  "FT_MODELS_DIR": "models/"
+}
