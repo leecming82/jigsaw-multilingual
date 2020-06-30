@@ -1,6 +1,9 @@
 ### Introduction
-PyTorch model code used by the 1st place winner for the  [2020 Jigsaw Multilingual Kaggle competition](https://www.kaggle.com/c/jigsaw-multilingual-toxic-comment-classification). 
-Our solution is detailed in this [Kaggle forum post](https://www.kaggle.com/c/jigsaw-multilingual-toxic-comment-classification/discussion/160862). This is "one-half" of the overall solution with the other half leveraging similar Tensorflow models trained on Kaggle TPUv3 instances.
+PyTorch/Tensorflow model code used by the 1st place winner for the  [2020 Jigsaw Multilingual Kaggle competition](https://www.kaggle.com/c/jigsaw-multilingual-toxic-comment-classification). 
+Our solution is detailed in this [Kaggle forum post](https://www.kaggle.com/c/jigsaw-multilingual-toxic-comment-classification/discussion/160862). 
+
+This is "one-half" of the overall solution designed for and executed on local hardware. 
+The other-half, created by my teammate [@rafiko1](https://www.kaggle.com/rafiko1) and designed for and executed on Kaggle TPUv3 instances, can be found at the GitHub repo: [here](https://github.com/rafiko1/jigsaw-multilingual-competition). 
 
 ### Recipe for training: 
 1. Bootstrap test-set predictions (pseudo-labels) for all languages using the 
@@ -12,7 +15,10 @@ predictions - update pseudo-labels
 4. Repeat steps 2 and 3 with various pretrained monolingual and multilingual 
 models 
 
-We provide 3 sets of sample pseudo-labels (scoring on public LB: 9372, 9500, 9537) for you to test training monolingual and multilingual models against (refer to the Data and model files section below).
+We provide 3 sets of sample pseudo-labels (scoring on public LB: 9372, 9500, 9537) for you to test training monolingual and multilingual models against (refer to the Data and model files section below). 
+
+
+You can use the provided 9372 pseudo-labels to bootstrap your training process or alternatively, run the [public Kaggle kernel](https://www.kaggle.com/xhlulu/jigsaw-tpu-xlm-roberta) (created by Kaggle user [@xhlulu](https://www.kaggle.com/xhlulu)) to generate test-set predictions/pseudo-labels using a vanilla XLM-Roberta-Large multilingual model.  
 
 
 ### Code
